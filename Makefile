@@ -6,10 +6,10 @@ DBT_UV_RUN ?= uv run --dev
 DBT_DIR=wintap_dbt
 DBT=$(DBT_UV_RUN) --project . dbt
 
-WINTAP_DBT_DATASET ?= $(WINTAP_DATA_ROOT)/parquet
+WINTAP_DBT_DATASET ?= $(WINTAP_DATA_ROOT)
 WINTAP_DBT_DATABASE ?= $(WINTAP_DATA_ROOT)/duckdb/wintap.duckdb
-WINTAP_DBT_START_DAY ?= $(shell if [ -n "$(WINTAP_DATA_ROOT)" ] && [ -d "$(WINTAP_DATA_ROOT)/parquet/raw_sensor" ]; then find "$(WINTAP_DATA_ROOT)/parquet/raw_sensor" -type d -name 'dayPK=*' 2>/dev/null | sed 's|.*/dayPK=||' | sort | head -1; fi)
-WINTAP_DBT_END_DAY ?= $(shell if [ -n "$(WINTAP_DATA_ROOT)" ] && [ -d "$(WINTAP_DATA_ROOT)/parquet/raw_sensor" ]; then find "$(WINTAP_DATA_ROOT)/parquet/raw_sensor" -type d -name 'dayPK=*' 2>/dev/null | sed 's|.*/dayPK=||' | sort | tail -1; fi)
+WINTAP_DBT_START_DAY ?= $(shell if [ -n "$(WINTAP_DATA_ROOT)" ] && [ -d "$(WINTAP_DATA_ROOT)/raw_sensor" ]; then find "$(WINTAP_DATA_ROOT)/raw_sensor" -type d -name 'dayPK=*' 2>/dev/null | sed 's|.*/dayPK=||' | sort | head -1; fi)
+WINTAP_DBT_END_DAY ?= $(shell if [ -n "$(WINTAP_DATA_ROOT)" ] && [ -d "$(WINTAP_DATA_ROOT)/raw_sensor" ]; then find "$(WINTAP_DATA_ROOT)/raw_sensor" -type d -name 'dayPK=*' 2>/dev/null | sed 's|.*/dayPK=||' | sort | tail -1; fi)
 
 export WINTAP_DBT_DATASET
 export WINTAP_DBT_DATABASE
