@@ -22,7 +22,7 @@ WINTAP_DATA_ROOT
 With the Makefile, DBT-specific values are derived from that root when unset:
 
 ```text
-WINTAP_DBT_DATASET=$WINTAP_DATA_ROOT/parquet
+WINTAP_DBT_DATASET=$WINTAP_DATA_ROOT
 WINTAP_DBT_RAW_SENSOR_DATASET=$WINTAP_DBT_DATASET
 WINTAP_DBT_DATABASE=$WINTAP_DATA_ROOT/duckdb/wintap.duckdb
 WINTAP_DBT_START_DAY=<minimum discovered dayPK>
@@ -52,7 +52,7 @@ The DBT path is layered deliberately so the same models can read local parquet o
 2. Environment variables
 
 - `WINTAP_DATA_ROOT` is the local run root used by the Makefile defaults.
-- `WINTAP_DBT_DATASET` is the general dataset root, defaulting to `$WINTAP_DATA_ROOT/parquet`.
+- `WINTAP_DBT_DATASET` is the general dataset root, defaulting to `$WINTAP_DATA_ROOT`.
 - `WINTAP_DBT_RAW_SENSOR_DATASET` optionally overrides only the raw parquet input root. Use this for split I/O, including S3-backed raw input with a local DuckDB output.
 - `WINTAP_DBT_START_DAY` / `WINTAP_DBT_END_DAY` and optional `WINTAP_DBT_START_HOUR` / `WINTAP_DBT_END_HOUR` define the inclusive partition window.
 
