@@ -12,4 +12,5 @@ union all select 'process_uber_summary', count(*) from {{ ref('process_uber_summ
 union all select 'pidstat_metrics', count(*) from {{ ref('pidstat_metrics') }}
 union all select 'pidstat_process_summary', count(*) from {{ ref('pidstat_process_summary') }}
 union all select 'telemetry_event_summary', count(*) from {{ ref('telemetry_event_summary') }}
+union all select 'attribution_quality_summary', count(*) from {{ ref('attribution_quality_summary') }}
 order by table_name
