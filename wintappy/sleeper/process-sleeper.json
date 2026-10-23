@@ -1,0 +1,52 @@
+{
+    "rowKeyFields": [
+      {
+        "name": "hostname",
+        "type": "StringType"
+      },
+      {
+        "name": "pid_hash",
+        "type": "StringType"
+      }
+    ],
+    "sortKeyFields": [
+      {
+        "name": "process_started_seconds",
+        "type": "LongType"
+      }
+    ],
+    "valueFields": [
+      {
+        "name": "os_family",
+        "type": "StringType"
+      },
+      {
+        "name": "process_name",
+        "type": "StringType"
+      },
+      {
+        "name": "os_pid",
+        "type": "IntType"
+      },
+      {
+        "name": "parent_pid_hash",
+        "type": "StringType"
+      },
+      {
+        "name": "parent_os_pid",
+        "type": "IntType"
+      },
+      {
+        "name": "process_path",
+        "type": "StringType"
+      },
+      {
+        "name": "filename",
+        "type": "StringType"
+      },
+      {
+        "name": "file_id",
+        "type": "StringType"
+      }
+    ]
+  }
