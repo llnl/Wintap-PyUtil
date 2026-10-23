@@ -147,6 +147,75 @@ def _(con, mo, query_df):
         order by child_relation
         """,
     )
+    top_pid_hash_orphans = query_df(
+        con,
+        """
+        -- Aggregate by the missing process identity, not merely by filename:
+        -- that makes the attribution gap and its data impact actionable.
+        with orphan_events as (
+            select
+                'process_file' as child_relation,
+                coalesce(c.hostname, '(unknown)') as hostname,
+                coalesce(c.process_name, '(unknown)') as process_name,
+                c.pid_hash,
+                c.event_count as event_count,
+                c.filename as affected_item,
+                c.activity_type as activity,
+                c.first_seen,
+                c.last_seen
+            from process_file c
+            left join process p on c.pid_hash = p.pid_hash
+            where c.pid_hash is not null and p.pid_hash is null
+
+            union all
+
+            select
+                'process_conn_incr',
+                coalesce(c.hostname, '(unknown)'),
+                coalesce(c.process_name, '(unknown)'),
+                c.pid_hash,
+                c.total_events,
+                c.protocol || ' ' || coalesce(c.remote_ip_addr, '?') || ':' || coalesce(cast(c.remote_port as varchar), '?'),
+                c.protocol,
+                c.first_seen,
+                c.last_seen
+            from process_conn_incr c
+            left join process p on c.pid_hash = p.pid_hash
+            where c.pid_hash is not null and p.pid_hash is null
+
+            union all
+
+            select
+                'process_net_conn',
+                coalesce(c.hostname, '(unknown)'),
+                coalesce(c.process_name, '(unknown)'),
+                c.pid_hash,
+                c.total_events,
+                c.protocol || ' ' || coalesce(c.remote_ip_addr, '?') || ':' || coalesce(cast(c.remote_port as varchar), '?'),
+                c.protocol,
+                c.first_seen,
+                c.last_seen
+            from process_net_conn c
+            left join process p on c.pid_hash = p.pid_hash
+            where c.pid_hash is not null and p.pid_hash is null
+        )
+        select
+            child_relation,
+            hostname,
+            process_name,
+            pid_hash,
+            count(*) as orphan_rows,
+            coalesce(sum(event_count), 0) as captured_events,
+            count(distinct affected_item) as affected_items,
+            string_agg(distinct activity, ', ' order by activity) as activities,
+            min(first_seen) as first_seen,
+            max(last_seen) as last_seen
+        from orphan_events
+        group by all
+        order by captured_events desc, orphan_rows desc, last_seen desc
+        limit 25
+        """,
+    )
     sentinel_pid_hash = query_df(
         con,
         """
@@ -168,15 +237,21 @@ def _(con, mo, query_df):
         """,
     )
     mo.md("## PID Hash QA")
-    return qa_pid_hash, sentinel_pid_hash
+    return qa_pid_hash, sentinel_pid_hash, top_pid_hash_orphans
 
 
 @app.cell
-def _(mo, qa_pid_hash, sentinel_pid_hash):
+def _(mo, qa_pid_hash, sentinel_pid_hash, top_pid_hash_orphans):
     mo.vstack(
         [
             mo.md("### PID hash orphan checks"),
             mo.ui.table(qa_pid_hash, pagination=False),
+            mo.md(
+                "### Top 25 orphan process identities\n"
+                "Grouped by child relation, host, reported process name, and missing PID hash; "
+                "ranked by captured event impact. `affected_items` is distinct files or network endpoints."
+            ),
+            mo.ui.table(top_pid_hash_orphans, pagination=False),
             mo.md("### Forbidden/sentinel PID hash values"),
             mo.ui.table(sentinel_pid_hash, pagination=False),
         ]

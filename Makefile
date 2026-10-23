@@ -65,7 +65,7 @@ dbt-check-config:
 	@test -n "$$WINTAP_DBT_DATABASE" || (echo "WINTAP_DBT_DATABASE is required" && exit 1)
 	@test -n "$$WINTAP_DBT_START_DAY" || (echo "WINTAP_DBT_START_DAY is required" && exit 1)
 	@test -n "$$WINTAP_DBT_END_DAY" || (echo "WINTAP_DBT_END_DAY is required" && exit 1)
-	#@test -d "$$WINTAP_DBT_DATASET/raw_sensor" || (echo "$$WINTAP_DBT_DATASET/raw_sensor does not exist" && exit 1)
+	@test -d "$$WINTAP_DBT_DATASET/raw_sensor" || (echo "$$WINTAP_DBT_DATASET/raw_sensor does not exist" && exit 1)
 	@mkdir -p "$$(dirname "$$WINTAP_DBT_DATABASE")"
 
 print-dbt-config: dbt-check-config
