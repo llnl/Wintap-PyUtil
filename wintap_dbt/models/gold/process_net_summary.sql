@@ -1,10 +1,10 @@
 select
-    os_family,
+    min(os_family) os_family,
     pid_hash,
     any_value(os_pid) os_pid,
-    process_name,
-    agent_id,
-    hostname,
+    arg_max(process_name, (last_seen, process_name)) process_name,
+    arg_max(agent_id, (last_seen, agent_id)) agent_id,
+    min(hostname) hostname,
     count(distinct conn_id) conn_id_count,
     sum(total_events) net_total_events,
     sum(total_size) net_total_size,
@@ -42,4 +42,4 @@ select
     avg(total_events) avg_packets,
     sum(sq_size) sq_size
 from {{ ref('process_net_conn') }}
-group by all
+group by pid_hash

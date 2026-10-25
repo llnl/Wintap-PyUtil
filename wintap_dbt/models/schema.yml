@@ -112,6 +112,7 @@ models:
       - name: pid_hash
         tests:
           - not_null
+          - unique
           - no_forbidden_pid_hash_values
 
   - name: process_uber_summary
@@ -120,6 +121,7 @@ models:
       - name: pid_hash
         tests:
           - not_null
+          - unique
           - no_forbidden_pid_hash_values
 
   - name: pidstat_metrics

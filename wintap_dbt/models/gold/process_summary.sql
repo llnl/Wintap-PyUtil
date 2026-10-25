@@ -1,6 +1,6 @@
 select
     p.*,
-    millisecond(p.process_term - p.process_started) / 1000 duration_seconds,
+    epoch(p.process_term - p.process_started) duration_seconds,
     r.total_activity_types reg_totals,
     r.reads reg_reads,
     r.writes reg_writes,
@@ -9,6 +9,7 @@ select
     r.deletevalues reg_deletevalues,
     r.first_seen reg_first_seen,
     r.last_seen reg_last_seen,
+    f.Open_Events,
     f.Close_Events,
     f.Create_Events,
     f.Delete_Events,
