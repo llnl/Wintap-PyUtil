@@ -68,6 +68,9 @@ DBT Makefile targets use `uv run --isolated --dev` by default so a missing or br
 
 Create the development environment and install the package in editable mode:
 
+The canonical Python/DBT environment pins DuckDB **1.5.6** in `pyproject.toml`.
+The DBT adapter remains on the 1.9 line; DuckDB 2.0 is not part of this update.
+
 ```bash
 uv sync --dev
 ```

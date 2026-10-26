@@ -232,49 +232,49 @@ SELECT
     sum(packetsize) total_size,
     count(*) num_raw_rows,
     sum(CASE
-        WHEN ipevent = 'TcpIp/Accept' THEN eventcount
+        WHEN lower(replace(ipevent, '/', '')) = 'tcpipaccept' THEN eventcount
     END) tcp_accept_count,
     sum(CASE
-        WHEN ipevent = 'TcpIp/Connect' THEN eventcount
+        WHEN lower(replace(ipevent, '/', '')) = 'tcpipconnect' THEN eventcount
     END) tcp_connect_count,
     sum(CASE
-        WHEN ipevent = 'TcpIp/Disconnect' THEN eventcount
+        WHEN lower(replace(ipevent, '/', '')) = 'tcpipdisconnect' THEN eventcount
     END) tcp_disconnect_count,
     sum(CASE
-        WHEN ipevent = 'TcpIp/Reconnect' THEN eventcount
+        WHEN lower(replace(ipevent, '/', '')) = 'tcpipreconnect' THEN eventcount
     END) tcp_reconnect_count,
     sum(CASE
-        WHEN ipevent = 'TcpIp/Recv' THEN eventcount
+        WHEN lower(replace(ipevent, '/', '')) IN ('tcpiprecv', 'tcpiprecvipv6') THEN eventcount
     END) tcp_recv_count,
     sum(CASE
-        WHEN ipevent = 'TcpIp/Recv' THEN packetsize
+        WHEN lower(replace(ipevent, '/', '')) IN ('tcpiprecv', 'tcpiprecvipv6') THEN packetsize
     END) tcp_recv_size,
     sum(CASE
-        WHEN ipevent = 'TcpIp/Retransmit' THEN eventcount
+        WHEN lower(replace(ipevent, '/', '')) = 'tcpipretransmit' THEN eventcount
     END) tcp_retransmit_count,
     sum(CASE
-        WHEN ipevent = 'TcpIp/Send' THEN eventcount
+        WHEN lower(replace(ipevent, '/', '')) IN ('tcpipsend', 'tcpipsendipv6') THEN eventcount
     END) tcp_send_count,
     sum(CASE
-        WHEN ipevent = 'TcpIp/Send' THEN packetsize
+        WHEN lower(replace(ipevent, '/', '')) IN ('tcpipsend', 'tcpipsendipv6') THEN packetsize
     END) tcp_send_size,
     sum(CASE
-        WHEN ipevent = 'TcpIp/TCPCopy' THEN eventcount
+        WHEN lower(replace(ipevent, '/', '')) = 'tcpiptcpcopy' THEN eventcount
     END) tcp_tcpcopy_count,
     sum(CASE
-        WHEN ipevent = 'TcpIp/TCPCopy' THEN packetsize
+        WHEN lower(replace(ipevent, '/', '')) = 'tcpiptcpcopy' THEN packetsize
     END) tcp_tcpcopy_size,
     sum(CASE
-        WHEN ipevent = 'UdpIp/Recv' THEN eventcount
+        WHEN lower(replace(ipevent, '/', '')) = 'udpiprecv' THEN eventcount
     END) udp_recv_count,
     sum(CASE
-        WHEN ipevent = 'UdpIp/Recv' THEN packetsize
+        WHEN lower(replace(ipevent, '/', '')) = 'udpiprecv' THEN packetsize
     END) udp_recv_size,
     sum(CASE
-        WHEN ipevent = 'UdpIp/Send' THEN eventcount
+        WHEN lower(replace(ipevent, '/', '')) = 'udpipsend' THEN eventcount
     END) udp_send_count,
     sum(CASE
-        WHEN ipevent = 'UdpIp/Send' THEN packetsize
+        WHEN lower(replace(ipevent, '/', '')) = 'udpipsend' THEN packetsize
     END) udp_send_size, -- Gather some basic stats on traffic
     -- Total events/sizes. In practice, at this level of detail, these *should* be really close the TCP/UDP stats, but exceptions like many connects/disconnects, retransmits, could throw some off.
     min(eventcount) min_10sec_eventcount,
@@ -285,52 +285,52 @@ SELECT
     -- TCP Stats - only doing send/receive for now.
     sum(packetsizesquared) sq_size,
     max(CASE
-        WHEN ipevent = 'TcpIp/Recv' THEN eventcount
+        WHEN lower(replace(ipevent, '/', '')) IN ('tcpiprecv', 'tcpiprecvipv6') THEN eventcount
     END) max_tcp_recv_count,
     min(CASE
-        WHEN ipevent = 'TcpIp/Recv' THEN minpacketsize
+        WHEN lower(replace(ipevent, '/', '')) IN ('tcpiprecv', 'tcpiprecvipv6') THEN minpacketsize
     END) min_tcp_recv_size,
     max(CASE
-        WHEN ipevent = 'TcpIp/Recv' THEN maxpacketsize
+        WHEN lower(replace(ipevent, '/', '')) IN ('tcpiprecv', 'tcpiprecvipv6') THEN maxpacketsize
     END) max_tcp_recv_size,
     sum(CASE
-        WHEN ipevent = 'TcpIp/Recv' THEN packetsizesquared
+        WHEN lower(replace(ipevent, '/', '')) IN ('tcpiprecv', 'tcpiprecvipv6') THEN packetsizesquared
     END) sq_tcp_recv_size, --
     max(CASE
-        WHEN ipevent = 'TcpIp/Send' THEN eventcount
+        WHEN lower(replace(ipevent, '/', '')) IN ('tcpipsend', 'tcpipsendipv6') THEN eventcount
     END) max_tcp_send_count,
     min(CASE
-        WHEN ipevent = 'TcpIp/Send' THEN minpacketsize
+        WHEN lower(replace(ipevent, '/', '')) IN ('tcpipsend', 'tcpipsendipv6') THEN minpacketsize
     END) min_tcp_send_size,
     max(CASE
-        WHEN ipevent = 'TcpIp/Send' THEN maxpacketsize
+        WHEN lower(replace(ipevent, '/', '')) IN ('tcpipsend', 'tcpipsendipv6') THEN maxpacketsize
     END) max_tcp_send_size,
     sum(CASE
-        WHEN ipevent = 'TcpIp/Send' THEN packetsizesquared
+        WHEN lower(replace(ipevent, '/', '')) IN ('tcpipsend', 'tcpipsendipv6') THEN packetsizesquared
     END) sq_tcp_send_size, -- UDP Stats
     max(CASE
-        WHEN ipevent = 'UdpIp/Recv' THEN eventcount
+        WHEN lower(replace(ipevent, '/', '')) = 'udpiprecv' THEN eventcount
     END) max_udp_recv_count,
     min(CASE
-        WHEN ipevent = 'UdpIp/Recv' THEN minpacketsize
+        WHEN lower(replace(ipevent, '/', '')) = 'udpiprecv' THEN minpacketsize
     END) min_udp_recv_size,
     max(CASE
-        WHEN ipevent = 'UdpIp/Recv' THEN maxpacketsize
+        WHEN lower(replace(ipevent, '/', '')) = 'udpiprecv' THEN maxpacketsize
     END) max_udp_recv_size,
     sum(CASE
-        WHEN ipevent = 'UdpIp/Recv' THEN packetsizesquared
+        WHEN lower(replace(ipevent, '/', '')) = 'udpiprecv' THEN packetsizesquared
     END) sq_udp_recv_size, --
     max(CASE
-        WHEN ipevent = 'UdpIp/Send' THEN eventcount
+        WHEN lower(replace(ipevent, '/', '')) = 'udpipsend' THEN eventcount
     END) max_udp_send_count,
     min(CASE
-        WHEN ipevent = 'UdpIp/Send' THEN minpacketsize
+        WHEN lower(replace(ipevent, '/', '')) = 'udpipsend' THEN minpacketsize
     END) min_udp_send_size,
     max(CASE
-        WHEN ipevent = 'UdpIp/Send' THEN maxpacketsize
+        WHEN lower(replace(ipevent, '/', '')) = 'udpipsend' THEN maxpacketsize
     END) max_udp_send_size,
     sum(CASE
-        WHEN ipevent = 'UdpIp/Send' THEN packetsizesquared
+        WHEN lower(replace(ipevent, '/', '')) = 'udpipsend' THEN packetsizesquared
     END) sq_udp_send_size,
     to_timestamp_micros(win32_to_epoch(min(cast(firstseenms as bigint)))) first_seen,
     to_timestamp_micros(win32_to_epoch(max(cast(lastseenms as bigint)))) last_seen

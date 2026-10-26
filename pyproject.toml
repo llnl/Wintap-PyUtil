@@ -12,7 +12,7 @@ dependencies = [
   "altair",
   "boto3",
   "dbt-duckdb>=1.9,<1.10",
-  "duckdb",
+  "duckdb==1.5.6",
   "dynaconf",
   "fsspec",
   "gitpython",
