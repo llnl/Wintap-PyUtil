@@ -33,6 +33,54 @@ You can still export any of those variables to override the defaults. DBT itself
 
 For split I/O, keep `WINTAP_DBT_DATABASE` local and point `WINTAP_DBT_RAW_SENSOR_DATASET` at the parquet dataset root that contains `raw_sensor/`. If that raw dataset lives on S3, the dbt DuckDB profile now loads `httpfs` and configures an S3 secret from the usual AWS environment variables. For Garage/path-style endpoints, also set `AWS_ENDPOINT_URL`, `AWS_DEFAULT_REGION` or `AWS_REGION`, and `DUCKDB_USE_SSL`.
 
+Date discovery uses the **effective local raw input root**, not the output root.
+S3 input requires explicit `WINTAP_DBT_START_DAY` and `WINTAP_DBT_END_DAY`.
+No local `raw_sensor/` placeholder or downloaded copy is required for S3:
+
+```sh
+export WINTAP_DATA_ROOT="$HOME/wintap-analysis/rhel8"
+export WINTAP_DBT_DATASET="$WINTAP_DATA_ROOT"
+export WINTAP_DBT_DATABASE="$WINTAP_DATA_ROOT/duckdb/wintap.duckdb"
+export WINTAP_DBT_RAW_SENSOR_DATASET="s3://lintap-alpha/lintap"
+export WINTAP_DBT_START_DAY=20261031
+export WINTAP_DBT_END_DAY=20261103
+# Authenticate through the usual AWS credential chain (profile/env/role).
+# Garage only: AWS_ENDPOINT_URL=https://server:port, AWS_DEFAULT_REGION=<region>,
+# DUCKDB_USE_SSL=true (false for an HTTP endpoint).
+make print-dbt-config
+make dbt-check-source
+make dbt-build
+```
+
+The raw root above resolves to `s3://lintap-alpha/lintap/raw_sensor/...`;
+do not append `raw_sensor` or an event name to the configured root.
+
+### Validation targets
+
+- `dbt-check-config`: offline source/configuration checks. Local raw input must
+  have a readable `raw_sensor/` directory; S3 requires a valid bucket/prefix URI,
+  not a local directory. Other URI schemes are rejected. Dates/hours are checked,
+  and the local DuckDB parent directory is created and checked for writability.
+- `print-dbt-config`: the same offline checks plus the effective raw source,
+  source type and date/hour window. It does not print credentials.
+- `dbt-check-source`: uses a DBT operation and the existing DuckDB S3 secret
+  configuration to list supported bronze event/alias Parquet files within the
+  requested partitions and read one matching file's schema. No AWS CLI is needed.
+  Listing stops after finding a sample; it does not scan all data or check every
+  file. Missing optional events remain valid, but no supported event files
+  anywhere in the requested window is an error. Access/endpoint/TLS and corrupt
+  sample errors retain DuckDB's diagnostics, rather than becoming "empty input".
+- `dbt-build`: automatically runs configuration and source checks before building.
+- `qa-dashboard` / `qa-pidstat`: require an existing local database, not reachable
+  raw input or a date window. Opening materialized results works offline; queries
+  against raw-backed bronze views still require raw-source access.
+
+The probe knows the current bronze input names and historical aliases; new bronze
+events must also be added to `macros/validate_source.sql`. S3 LIST prefixes include
+the event and requested day (and hour, when configured). Large windows can still
+require multiple listings. A successful probe is basic access evidence, **not** a
+full dataset-integrity or model-compatibility qualification.
+
 Raw parquet scans also narrow their file globs to the requested `dayPK=` partitions from `WINTAP_DBT_START_DAY` through `WINTAP_DBT_END_DAY`, which helps when reading a small window out of a much larger remote dataset. The compile-time raw-event alias and optional-column checks use the same narrowed day partition set instead of probing the full event prefix.
 
 If `WINTAP_DBT_START_HOUR` and/or `WINTAP_DBT_END_HOUR` are set, dbt further narrows raw scans to `hourPK=HH` partitions within the inclusive `start day/hour` to `end day/hour` window. When omitted, all hours in the requested day range are included.

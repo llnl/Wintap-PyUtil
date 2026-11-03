@@ -39,6 +39,9 @@
     {%- if raw_hour == '' -%}
         {{ return(default_hour) }}
     {%- endif -%}
+    {%- if not raw_hour.isdigit() or raw_hour | length > 2 -%}
+        {{ exceptions.raise_compiler_error('Hour values must be numeric hours between 00 and 23') }}
+    {%- endif -%}
     {%- set hour_int = raw_hour | int -%}
     {%- if hour_int < 0 or hour_int > 23 -%}
         {{ exceptions.raise_compiler_error('Hour values must be between 00 and 23') }}
