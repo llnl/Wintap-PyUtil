@@ -13,7 +13,8 @@
     {%- set events = ['raw_host', 'raw_process', 'raw_process_file',
         'raw_process_conn_incr', 'raw_macip', 'raw_macip_sensor',
         'raw_process_registry', 'raw_registry', 'raw_imageload',
-        'raw_image_load', 'pidstat'] -%}
+        'raw_image_load', 'raw_selinuxavc', 'raw_selinuxinteraction',
+        'raw_selinuxtransition', 'pidstat'] -%}
     {%- for event_type in events -%}
         {%- if ns.sample is none -%}
             {%- for glob_path in raw_sensor_partition_globs(event_type) -%}

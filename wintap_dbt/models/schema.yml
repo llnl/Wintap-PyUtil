@@ -180,3 +180,134 @@ models:
         description: Explicit maximum core-summed process CPU percent for performance rows.
       - name: max_cpu
         description: Compatibility alias of max_cpu_core_percent for performance rows.
+
+  - name: stg_raw_selinuxavc
+    description: Optional bronze scan for native SELinux AVC records; num_dups counts identical raw rows.
+    columns:
+      - name: MessageType
+        tests: [not_null]
+      - name: EventTime
+        tests: [not_null]
+      - name: EventCount
+        tests: [not_null]
+      - name: num_dups
+        tests: [not_null]
+
+  - name: stg_raw_selinuxinteraction
+    description: Optional bronze scan for folded or permission-expanded SELinux interaction records.
+    columns:
+      - name: MessageType
+        tests: [not_null]
+      - name: EventTime
+        tests: [not_null]
+      - name: EventCount
+        tests: [not_null]
+      - name: num_dups
+        tests: [not_null]
+
+  - name: stg_raw_selinuxtransition
+    description: Optional bronze scan for native SELinux context-transition records.
+    columns:
+      - name: MessageType
+        tests: [not_null]
+      - name: EventTime
+        tests: [not_null]
+      - name: EventCount
+        tests: [not_null]
+      - name: num_dups
+        tests: [not_null]
+
+  - name: selinux_avc
+    description: Silver AVC detail at the deduplicated native row grain. EventTime is Unix seconds; FirstSeen and LastSeen are FILETIME.
+    columns:
+      - name: event_id
+        tests: [not_null, unique]
+      - name: event_family
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['selinux_avc']
+      - name: event_count
+        tests: [not_null]
+      - name: first_seen
+        tests: [not_null]
+      - name: last_seen
+        tests: [not_null]
+
+  - name: selinux_interaction
+    description: Silver folded or permission-expanded interaction detail; event_count is the producer observation count, not a row count.
+    columns:
+      - name: event_id
+        tests: [not_null, unique]
+      - name: event_family
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['selinux_interaction']
+      - name: event_count
+        tests: [not_null]
+      - name: first_seen
+        tests: [not_null]
+      - name: last_seen
+        tests: [not_null]
+
+  - name: selinux_transition
+    description: Silver context-transition detail at the deduplicated native row grain.
+    columns:
+      - name: event_id
+        tests: [not_null, unique]
+      - name: event_family
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['selinux_transition']
+      - name: event_count
+        tests: [not_null]
+      - name: first_seen
+        tests: [not_null]
+      - name: last_seen
+        tests: [not_null]
+
+  - name: selinux_attribution
+    description: Shared SELinux attribution relation with exact, unique temporal fallback, ambiguous, and unmatched outcomes.
+    columns:
+      - name: event_id
+        tests: [not_null, unique]
+      - name: attribution_status
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['exact', 'unique_temporal', 'ambiguous', 'unmatched']
+      - name: candidate_count
+        tests: [not_null]
+
+  - name: selinux_event_detail
+    description: Common analytical detail index joined to family-specific silver payloads; family silver models remain authoritative.
+    columns:
+      - name: event_id
+        tests: [not_null, unique]
+      - name: event_family
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['selinux_avc', 'selinux_interaction', 'selinux_transition']
+      - name: event_count
+        tests: [not_null]
+
+  - name: selinux_context
+    description: Distinct observed SELinux contexts by family, role, and policy epoch with observation bounds and EventCount sums.
+
+  - name: selinux_avc_summary
+    description: AVC summary grouped by host, attribution outcome, process identity, contexts, class, result, enforcing state, and policy epoch.
+
+  - name: selinux_interaction_summary
+    description: Interaction summary preserving folded EventCount semantics and separating observation row counts from event counts.
+
+  - name: selinux_transition_summary
+    description: Transition summary grouped by host, attribution outcome, old/new contexts, executable, and policy epoch.
+
+  - name: selinux_process_summary
+    description: Process-centric SELinux summary with attribution outcomes retained as separate groups.
+
+  - name: selinux_quality_summary
+    description: Monitoring coverage, duplicate, timestamp, context, and attribution metrics for each SELinux event family.
