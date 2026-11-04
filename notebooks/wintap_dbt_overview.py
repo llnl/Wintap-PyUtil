@@ -122,7 +122,7 @@ def _(con, mo, pd, query_df, table_exists):
                 normalized_rows,
                 raw_rows,
                 duplicate_rows,
-                event_count,
+                event_count as producer_event_count_sum,
                 round(100.0 * normalized_rows / nullif(raw_rows, 0), 2) as row_retention_pct,
                 round(100.0 * duplicate_rows / nullif(raw_rows, 0), 2) as duplicate_pct,
                 exact_rows,
@@ -146,7 +146,7 @@ def _(con, mo, pd, query_df, table_exists):
             """
             select
                 count(*) as normalized_rows,
-                coalesce(sum(event_count), 0) as event_count,
+                coalesce(sum(event_count), 0) as producer_event_count_sum,
                 count(distinct hostname) as hosts,
                 count(distinct agent_id) as agent_ids,
                 count(distinct attributed_pid_hash) filter (where attributed_pid_hash is not null) as attributed_processes,
@@ -159,7 +159,11 @@ def _(con, mo, pd, query_df, table_exists):
             con,
             """
             with status_counts as (
-                select event_family, attribution_status, count(*) as rows, sum(event_count) as event_count
+                select
+                    event_family,
+                    attribution_status,
+                    count(*) as rows,
+                    sum(event_count) as producer_event_count_sum
                 from selinux_attribution
                 group by all
             )
@@ -167,9 +171,13 @@ def _(con, mo, pd, query_df, table_exists):
                 event_family,
                 attribution_status,
                 rows,
-                event_count,
+                producer_event_count_sum,
                 round(100.0 * rows / nullif(sum(rows) over (partition by event_family), 0), 2) as row_pct,
-                round(100.0 * event_count / nullif(sum(event_count) over (partition by event_family), 0), 2) as event_count_pct
+                round(
+                    100.0 * producer_event_count_sum
+                    / nullif(sum(producer_event_count_sum) over (partition by event_family), 0),
+                    2,
+                ) as event_count_pct
             from status_counts
             order by event_family, attribution_status
             """,
@@ -214,7 +222,7 @@ def _(alt, mo, selinux_attribution, selinux_available, selinux_quality, selinux_
                     "normalized_rows:Q",
                     "raw_rows:Q",
                     "duplicate_rows:Q",
-                    "event_count:Q",
+                    "producer_event_count_sum:Q",
                 ],
             )
             .properties(height=260, title="Normalized observations by family")
@@ -231,7 +239,7 @@ def _(alt, mo, selinux_attribution, selinux_available, selinux_quality, selinux_
                     "attribution_status:N",
                     "rows:Q",
                     "row_pct:Q",
-                    "event_count:Q",
+                    "producer_event_count_sum:Q",
                 ],
             )
             .properties(height=260, title="Attribution outcomes")
@@ -241,8 +249,9 @@ def _(alt, mo, selinux_attribution, selinux_available, selinux_quality, selinux_
                 mo.md(
                     "## SELinux\n"
                     "Native AVC, interaction, and transition streams summarized at their own grains. "
-                    "`EventCount` is producer-provided and is not interchangeable with row count; "
-                    "interaction rows are folded or permission-expanded observations."
+                    "The scope total is the sum of producer `EventCount` values, not a count of "
+                    "individual kernel events. Use normalized rows for observation volume; "
+                    "interaction `EventCount` values are folded or permission-expanded."
                 ),
                 mo.md("### Dataset scope"),
                 mo.ui.table(selinux_scope, pagination=False),
