@@ -258,13 +258,15 @@ def test_local_dbt_preflight(env, tmp_path, scenario):
 
 
 @pytest.mark.parametrize(
-    "scenario", ["valid", "hour-window", "empty", "list-denied", "read-denied", "tls-error"]
+    "scenario",
+    ["valid", "hour-window", "profile", "empty", "list-denied", "read-denied", "tls-error"],
 )
 def test_s3_dbt_preflight(env, tmp_path, scenario):
     """Real DuckDB httpfs against a private loopback S3 protocol fixture, not live S3."""
     data = parquet_file(tmp_path).read_bytes()
     key = "lintap/raw_sensor/pidstat/dayPK=20261031/hourPK=09/sample.parquet"
     requests = []
+    authorization_headers = []
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -280,10 +282,12 @@ def test_s3_dbt_preflight(env, tmp_path, scenario):
 
         def do_HEAD(self):
             requests.append((self.command, self.path))
+            authorization_headers.append(self.headers.get("Authorization", ""))
             self.respond(403 if scenario == "read-denied" else 200, data)
 
         def do_GET(self):
             requests.append((self.command, self.path))
+            authorization_headers.append(self.headers.get("Authorization", ""))
             query = parse_qs(urlsplit(self.path).query)
             if "list-type" in query:
                 if scenario == "list-denied":
@@ -321,12 +325,29 @@ def test_s3_dbt_preflight(env, tmp_path, scenario):
         AWS_ENDPOINT_URL=f"http://127.0.0.1:{server.server_port}",
         AWS_DEFAULT_REGION="garage",
         DUCKDB_USE_SSL="false",
-        AWS_ACCESS_KEY_ID="fixture-key",
-        AWS_SECRET_ACCESS_KEY="fixture-secret",
         AWS_EC2_METADATA_DISABLED="true",
         AWS_CONFIG_FILE=str(tmp_path / "no-aws-config"),
         AWS_SHARED_CREDENTIALS_FILE=str(tmp_path / "no-aws-credentials"),
     )
+    if scenario == "profile":
+        config_file = tmp_path / "aws-config"
+        config_file.write_text("[profile lintap-alpha]\nregion = garage\n")
+        credentials_file = tmp_path / "aws-credentials"
+        credentials_file.write_text(
+            "[default]\n"
+            "aws_access_key_id = wrong-default-key\n"
+            "aws_secret_access_key = wrong-default-secret\n\n"
+            "[lintap-alpha]\n"
+            "aws_access_key_id = profile-key\n"
+            "aws_secret_access_key = profile-secret\n"
+        )
+        env.update(
+            AWS_PROFILE="lintap-alpha",
+            AWS_CONFIG_FILE=str(config_file),
+            AWS_SHARED_CREDENTIALS_FILE=str(credentials_file),
+        )
+    else:
+        env.update(AWS_ACCESS_KEY_ID="fixture-key", AWS_SECRET_ACCESS_KEY="fixture-secret")
     if scenario == "hour-window":
         env.update(
             WINTAP_DBT_START_HOUR="09", WINTAP_DBT_END_DAY="20261031", WINTAP_DBT_END_HOUR="09"
@@ -352,10 +373,12 @@ def test_s3_dbt_preflight(env, tmp_path, scenario):
             assert "/dayPK=" in query["prefix"][0]
             if scenario == "hour-window":
                 assert "/hourPK=09/" in query["prefix"][0]
-    if scenario in ("valid", "hour-window"):
+    if scenario in ("valid", "hour-window", "profile"):
         assert result.returncode == 0, output
         assert "Raw source check passed" in output
         assert any("/lintap-alpha/" in path for _, path in requests)
+        if scenario == "profile":
+            assert any("Credential=profile-key/" in header for header in authorization_headers)
     else:
         assert result.returncode != 0, output
         assert ("No input found" if scenario == "empty" else "403") in output

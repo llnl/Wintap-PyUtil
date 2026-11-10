@@ -31,7 +31,7 @@ WINTAP_DBT_END_DAY=<maximum discovered dayPK>
 
 You can still export any of those variables to override the defaults. DBT itself requires `WINTAP_DBT_DATASET`, `WINTAP_DBT_START_DAY`, `WINTAP_DBT_END_DAY`, and `WINTAP_DBT_DATABASE`; the Makefile fills them from `WINTAP_DATA_ROOT` for normal runs.
 
-For split I/O, keep `WINTAP_DBT_DATABASE` local and point `WINTAP_DBT_RAW_SENSOR_DATASET` at the parquet dataset root that contains `raw_sensor/`. If that raw dataset lives on S3, the dbt DuckDB profile now loads `httpfs` and configures an S3 secret from the usual AWS environment variables. For Garage/path-style endpoints, also set `AWS_ENDPOINT_URL`, `AWS_DEFAULT_REGION` or `AWS_REGION`, and `DUCKDB_USE_SSL`.
+For split I/O, keep `WINTAP_DBT_DATABASE` local and point `WINTAP_DBT_RAW_SENSOR_DATASET` at the parquet dataset root that contains `raw_sensor/`. If that raw dataset lives on S3, the dbt DuckDB profile now loads `httpfs` and configures an S3 secret from the usual AWS environment variables. Set `AWS_PROFILE` to select a named shared AWS profile; DBT passes it explicitly to DuckDB's credential-chain secret. DuckDB does not copy a profile's custom `endpoint_url` into the secret, so Garage/path-style users must also set `AWS_ENDPOINT_URL`, `AWS_DEFAULT_REGION` or `AWS_REGION`, and `DUCKDB_USE_SSL` to match that endpoint.
 
 Date discovery uses the **effective local raw input root**, not the output root.
 S3 input requires explicit `WINTAP_DBT_START_DAY` and `WINTAP_DBT_END_DAY`.
@@ -44,9 +44,14 @@ export WINTAP_DBT_DATABASE="$WINTAP_DATA_ROOT/duckdb/wintap.duckdb"
 export WINTAP_DBT_RAW_SENSOR_DATASET="s3://lintap-alpha/lintap"
 export WINTAP_DBT_START_DAY=20261031
 export WINTAP_DBT_END_DAY=20261103
-# Authenticate through the usual AWS credential chain (profile/env/role).
-# Garage only: AWS_ENDPOINT_URL=https://server:port, AWS_DEFAULT_REGION=<region>,
-# DUCKDB_USE_SSL=true (false for an HTTP endpoint).
+# For a named profile with a configured S3-compatible endpoint:
+export AWS_PROFILE=lintap-alpha
+export AWS_DEFAULT_REGION="$(aws configure get region --profile "$AWS_PROFILE")"
+export AWS_ENDPOINT_URL="$(aws configure get endpoint_url --profile "$AWS_PROFILE")"
+case "$AWS_ENDPOINT_URL" in
+  https://*) export DUCKDB_USE_SSL=true ;;
+  http://*) export DUCKDB_USE_SSL=false ;;
+esac
 make print-dbt-config
 make dbt-check-source
 make dbt-build
