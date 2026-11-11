@@ -5,7 +5,15 @@ select
     pidhash pid_hash,
     any_value(pid) os_pid,
     processname process_name,
-    connid conn_id,
+    -- TEMPORARY: emulate the governing, direction-independent FiveTupleConn ID
+    -- in DBT until the authoritative implementation is moved into Wintap .NET.
+    {{ temporary_five_tuple_conn_id(
+        'protocol',
+        'cast(localipaddr as bigint)',
+        'localport',
+        'cast(remoteipaddr as bigint)',
+        'remoteport'
+    ) }} as conn_id,
     protocol protocol,
     {{ win32_to_minute_timestamp_expr('cast(firstseenms as bigint)') }} incr_start,
     sourceipaddressstring source_ip_address_string,
