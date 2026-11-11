@@ -171,6 +171,33 @@ System.Runtime cpu-usage`. The gold `max_cpu_percent`/`avg_cpu_percent` and
 monitoring `max_cpu` columns remain compatibility aliases of these core-summed
 values; new queries should use the explicit `*_cpu_core_percent` names.
 
+### SELinux telemetry
+
+Optional `raw_selinuxavc`, `raw_selinuxinteraction`, and `raw_selinuxtransition`
+sources produce typed empty relations when absent. Each family has bronze staging,
+normalized silver detail, and gold summaries; `selinux_event_detail`,
+`selinux_context`, and `selinux_process_summary` provide shared analysis views.
+The QA dashboard reports family counts, contexts, and attribution coverage.
+
+`EventTime` is Unix seconds; `FirstSeen`/`LastSeen` are FILETIME. Silver retains
+raw values and normalizes timestamps. Bronze removes identical rows and records
+`num_dups`; silver/gold preserve producer `EventCount` rather than multiplying it
+by duplicate counts. Interaction output is folded/permission-expanded: neither
+its rows nor its `EventCount` should be presented as distinct kernel events.
+Attribution accepts exact identity or a single host/PID/lifetime candidate;
+ambiguous and unmatched observations remain visible without assigned ownership.
+
+### Temporary network identity compatibility change
+
+`process_conn_incr.conn_id` currently replaces producer `connid` with an uppercase
+MD5 of a canonical JSON five-tuple (protocol and ordered IP/port endpoint pairs,
+with context `llnl`). Reversed endpoints share an ID; missing tuple fields yield
+NULL. This is a temporary DBT validation shim, **not** the authoritative Wintap
+.NET implementation or a connection-instance identity: repeated uses of the same
+five-tuple share the key. Existing IDs and joins to producer IDs can change;
+rebuild dependent models together and review downstream consumers before release.
+See `macros/network_keys.sql` and `tests/temporary_five_tuple_conn_id_contract.sql`.
+
 ## Layers
 
 - `models/bronze` — raw parquet scans and compatibility layer.
@@ -198,3 +225,15 @@ Implemented:
 - Parquet export is not implemented yet; DBT builds into DuckDB.
 - Label/Sigma/MITRE/LOLBAS source loading is stubbed for now.
 - The historical `merged` flow is intentionally not supported here.
+
+### Combined-feature release follow-up
+
+- Qualify full builds/tests against representative split-local and authenticated
+  S3 inputs, including SELinux families. A successful source preflight alone is
+  not a full build or all-file integrity check.
+- Approve the temporary network-ID compatibility change and track migration to
+  the authoritative producer implementation.
+- Harden/test `scripts/lintap-pull-s3.sh` before treating it as a supported release
+  interface: calendar/date-order checks, GNU/BSD date behavior, discovery errors,
+  literal host filtering, and configurable defaults. `-n` prevents sync writes
+  but still makes discovery/list requests when event types are omitted.
