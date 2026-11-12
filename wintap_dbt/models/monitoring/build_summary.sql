@@ -11,6 +11,17 @@ union all select 'process_summary', count(*) from {{ ref('process_summary') }}
 union all select 'process_uber_summary', count(*) from {{ ref('process_uber_summary') }}
 union all select 'pidstat_metrics', count(*) from {{ ref('pidstat_metrics') }}
 union all select 'pidstat_process_summary', count(*) from {{ ref('pidstat_process_summary') }}
+union all select 'selinux_avc', count(*) from {{ ref('selinux_avc') }}
+union all select 'selinux_interaction', count(*) from {{ ref('selinux_interaction') }}
+union all select 'selinux_transition', count(*) from {{ ref('selinux_transition') }}
+union all select 'selinux_attribution', count(*) from {{ ref('selinux_attribution') }}
+union all select 'selinux_event_detail', count(*) from {{ ref('selinux_event_detail') }}
+union all select 'selinux_context', count(*) from {{ ref('selinux_context') }}
+union all select 'selinux_avc_summary', count(*) from {{ ref('selinux_avc_summary') }}
+union all select 'selinux_interaction_summary', count(*) from {{ ref('selinux_interaction_summary') }}
+union all select 'selinux_transition_summary', count(*) from {{ ref('selinux_transition_summary') }}
+union all select 'selinux_process_summary', count(*) from {{ ref('selinux_process_summary') }}
+union all select 'selinux_quality_summary', count(*) from {{ ref('selinux_quality_summary') }}
 union all select 'telemetry_event_summary', count(*) from {{ ref('telemetry_event_summary') }}
 union all select 'attribution_quality_summary', count(*) from {{ ref('attribution_quality_summary') }}
 order by table_name

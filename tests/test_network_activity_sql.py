@@ -12,7 +12,10 @@ DBT = Path(__file__).resolve().parents[1] / "wintap_dbt"
 def render(path):
     env = jinja2.Environment(undefined=jinja2.StrictUndefined)
     # These macros are pure SQL renderers; no DBT context is needed here.
-    macro_source = "\n".join((DBT / "macros" / name).read_text() for name in ("time.sql", "ip.sql"))
+    macro_source = "\n".join(
+        (DBT / "macros" / name).read_text()
+        for name in ("time.sql", "ip.sql", "network_keys.sql")
+    )
     module = env.from_string(macro_source).module
     env.globals.update({name: getattr(module, name) for name in dir(module) if not name.startswith("_")})
     env.globals["ref"] = lambda name: name
@@ -123,3 +126,22 @@ def test_mixed_spellings_are_counted_together(connection):
     assert result["tcp_recv_count"] == 21
     assert result["tcp_send_count"] == 7
     assert result["total_events"] == 28
+
+
+def test_temporary_connection_id_contract(connection):
+    sql = render(DBT / "tests/temporary_five_tuple_conn_id_contract.sql")
+    assert connection.execute(sql).fetchall() == []
+
+
+def test_real_model_uses_direction_independent_connection_id(connection):
+    insert_activity(connection, "TcpIpSend")
+    forward = model_result(connection)
+    connection.execute("""
+        update stg_raw_process_conn_incr set
+          localipaddr = remoteipaddr, localport = remoteport,
+          remoteipaddr = localipaddr, remoteport = localport
+    """)
+    reverse = model_result(connection)
+    assert forward["conn_id"] == reverse["conn_id"]
+    assert forward["conn_id"] != "connection"
+    assert reverse["total_events"] == forward["total_events"]

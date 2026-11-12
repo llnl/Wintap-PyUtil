@@ -43,7 +43,7 @@ def _():
             ).fetchone()[0]
         )
 
-    return Path, alt, db_path, duckdb, go, make_subplots, mo, query_df, table_exists
+    return Path, alt, db_path, duckdb, go, make_subplots, mo, pd, query_df, table_exists
 
 
 @app.cell
@@ -96,6 +96,329 @@ def _(build_summary, event_summary, mo):
             mo.ui.table(event_summary, pagination=False),
         ]
     )
+    return
+
+
+@app.cell
+def _(con, mo, pd, query_df, table_exists):
+    selinux_relation_names = [
+        "selinux_quality_summary",
+        "selinux_event_detail",
+        "selinux_attribution",
+        "selinux_context",
+        "selinux_avc_summary",
+        "selinux_interaction_summary",
+        "selinux_transition_summary",
+        "selinux_process_summary",
+    ]
+    selinux_available = all(table_exists(con, relation) for relation in selinux_relation_names)
+
+    if selinux_available:
+        selinux_quality = query_df(
+            con,
+            """
+            select
+                event_family,
+                normalized_rows,
+                raw_rows,
+                duplicate_rows,
+                event_count as producer_event_count_sum,
+                round(100.0 * normalized_rows / nullif(raw_rows, 0), 2) as row_retention_pct,
+                round(100.0 * duplicate_rows / nullif(raw_rows, 0), 2) as duplicate_pct,
+                exact_rows,
+                unique_temporal_rows,
+                ambiguous_rows,
+                unmatched_rows,
+                round(100.0 * (exact_rows + unique_temporal_rows) / nullif(normalized_rows, 0), 2) as attributed_pct,
+                round(100.0 * ambiguous_rows / nullif(normalized_rows, 0), 2) as ambiguous_pct,
+                round(100.0 * unmatched_rows / nullif(normalized_rows, 0), 2) as unmatched_pct,
+                rows_with_multiple_candidates,
+                blank_source_context_rows,
+                blank_target_context_rows,
+                first_seen,
+                last_seen
+            from selinux_quality_summary
+            order by event_family
+            """,
+        )
+        selinux_scope = query_df(
+            con,
+            """
+            select
+                count(*) as normalized_rows,
+                coalesce(sum(event_count), 0) as producer_event_count_sum,
+                count(distinct hostname) as hosts,
+                count(distinct agent_id) as agent_ids,
+                count(distinct attributed_pid_hash) filter (where attributed_pid_hash is not null) as attributed_processes,
+                min(first_seen) as first_seen,
+                max(last_seen) as last_seen
+            from selinux_event_detail
+            """,
+        )
+        selinux_attribution = query_df(
+            con,
+            """
+            with status_counts as (
+                select
+                    event_family,
+                    attribution_status,
+                    count(*) as rows,
+                    sum(event_count) as producer_event_count_sum
+                from selinux_attribution
+                group by all
+            )
+            select
+                event_family,
+                attribution_status,
+                rows,
+                producer_event_count_sum,
+                round(100.0 * rows / nullif(sum(rows) over (partition by event_family), 0), 2) as row_pct,
+                round(
+                    100.0 * producer_event_count_sum
+                    / nullif(sum(producer_event_count_sum) over (partition by event_family), 0),
+                    2,
+                ) as event_count_pct
+            from status_counts
+            order by event_family, attribution_status
+            """,
+        )
+    else:
+        selinux_quality = pd.DataFrame()
+        selinux_scope = pd.DataFrame()
+        selinux_attribution = pd.DataFrame()
+
+    return selinux_attribution, selinux_available, selinux_quality, selinux_scope
+
+
+@app.cell
+def _(alt, mo, selinux_attribution, selinux_available, selinux_quality, selinux_scope):
+    if not selinux_available:
+        selinux_summary_panel = mo.vstack(
+            [
+                mo.md(
+                    "## SELinux\n"
+                    "The current database does not contain the SELinux DBT relations. "
+                    "Run the current `make dbt-build` to populate this page."
+                )
+            ]
+        )
+    elif selinux_quality.empty or "error" in selinux_quality.columns:
+        selinux_summary_panel = mo.vstack(
+            [
+                mo.md("## SELinux\nSELinux relations exist, but no quality rows are available."),
+                mo.ui.table(selinux_quality, pagination=False),
+            ]
+        )
+    else:
+        selinux_quality_chart = (
+            alt.Chart(selinux_quality)
+            .mark_bar()
+            .encode(
+                x=alt.X("event_family:N", title="Family"),
+                y=alt.Y("normalized_rows:Q", title="Normalized rows"),
+                color=alt.Color("event_family:N", legend=None),
+                tooltip=[
+                    "event_family:N",
+                    "normalized_rows:Q",
+                    "raw_rows:Q",
+                    "duplicate_rows:Q",
+                    "producer_event_count_sum:Q",
+                ],
+            )
+            .properties(height=260, title="Normalized observations by family")
+        )
+        selinux_attribution_chart = (
+            alt.Chart(selinux_attribution)
+            .mark_bar()
+            .encode(
+                x=alt.X("event_family:N", title="Family"),
+                y=alt.Y("rows:Q", title="Rows"),
+                color=alt.Color("attribution_status:N", title="Attribution"),
+                tooltip=[
+                    "event_family:N",
+                    "attribution_status:N",
+                    "rows:Q",
+                    "row_pct:Q",
+                    "producer_event_count_sum:Q",
+                ],
+            )
+            .properties(height=260, title="Attribution outcomes")
+        )
+        selinux_summary_panel = mo.vstack(
+            [
+                mo.md(
+                    "## SELinux\n"
+                    "Native AVC, interaction, and transition streams summarized at their own grains. "
+                    "The scope total is the sum of producer `EventCount` values, not a count of "
+                    "individual kernel events. Use normalized rows for observation volume; "
+                    "interaction `EventCount` values are folded or permission-expanded."
+                ),
+                mo.md("### Dataset scope"),
+                mo.ui.table(selinux_scope, pagination=False),
+                mo.md("### Family quality summary"),
+                mo.ui.table(selinux_quality, pagination=False),
+                selinux_quality_chart,
+                mo.md("### Attribution quality"),
+                mo.ui.table(selinux_attribution, pagination=False),
+                selinux_attribution_chart,
+            ]
+        )
+    selinux_summary_panel
+    return
+
+
+@app.cell
+def _(con, mo, pd, query_df, selinux_available):
+    if selinux_available:
+        selinux_context_detail = query_df(
+            con,
+            """
+            select event_family, context_role, context, policy_epoch,
+                   observation_rows, event_count, first_seen, last_seen
+            from selinux_context
+            where context is not null and trim(context) <> ''
+            order by event_count desc nulls last, observation_rows desc, event_family, context
+            limit 100
+            """,
+        )
+        selinux_avc_detail = query_df(
+            con,
+            """
+            select hostname, attribution_status, attributed_process_name, raw_process_name,
+                   s_context, t_context, t_class, result, enforcing, policy_epoch,
+                   observation_rows, event_count, first_seen, last_seen
+            from selinux_avc_summary
+            order by event_count desc nulls last, observation_rows desc
+            limit 100
+            """,
+        )
+        selinux_interaction_detail = query_df(
+            con,
+            """
+            select hostname, attribution_status, attributed_process_name, raw_process_name,
+                   s_context, t_context, t_class, permission, novel, policy_epoch,
+                   observation_rows, event_count, first_seen, last_seen
+            from selinux_interaction_summary
+            order by event_count desc nulls last, observation_rows desc
+            limit 100
+            """,
+        )
+        selinux_transition_detail = query_df(
+            con,
+            """
+            select hostname, attribution_status, attributed_process_name, raw_process_name,
+                   old_context, new_context, exe_file, policy_epoch,
+                   observation_rows, event_count, first_seen, last_seen
+            from selinux_transition_summary
+            order by event_count desc nulls last, observation_rows desc
+            limit 100
+            """,
+        )
+        selinux_process_detail = query_df(
+            con,
+            """
+            select event_family, attribution_status, hostname, pid_hash, raw_pid_hash,
+                   raw_process_name, attributed_process_name, observation_rows, event_count,
+                   first_seen, last_seen
+            from selinux_process_summary
+            order by event_count desc nulls last, observation_rows desc
+            limit 100
+            """,
+        )
+        selinux_timeline = query_df(
+            con,
+            """
+            select time_bucket(interval 1 hour, event_time) as time_bucket,
+                   event_family, count(*) as observation_rows, sum(event_count) as event_count
+            from selinux_event_detail
+            group by all
+            order by time_bucket, event_family
+            """,
+        )
+    else:
+        selinux_context_detail = pd.DataFrame()
+        selinux_avc_detail = pd.DataFrame()
+        selinux_interaction_detail = pd.DataFrame()
+        selinux_transition_detail = pd.DataFrame()
+        selinux_process_detail = pd.DataFrame()
+        selinux_timeline = pd.DataFrame()
+
+    return (
+        selinux_avc_detail,
+        selinux_context_detail,
+        selinux_interaction_detail,
+        selinux_process_detail,
+        selinux_timeline,
+        selinux_transition_detail,
+    )
+
+
+@app.cell
+def _(alt, mo, selinux_available, selinux_timeline):
+    if not selinux_available:
+        selinux_detail_panel = mo.md(
+            "### SELinux detail\nDetailed views are unavailable until the SELinux DBT models are built."
+        )
+    elif selinux_timeline.empty or "error" in selinux_timeline.columns:
+        selinux_detail_panel = mo.ui.table(selinux_timeline, pagination=False)
+    else:
+        selinux_timeline_chart = (
+            alt.Chart(selinux_timeline)
+            .mark_line(point=True)
+            .encode(
+                x=alt.X("time_bucket:T", title="Time"),
+                y=alt.Y("event_count:Q", title="EventCount sum"),
+                color=alt.Color("event_family:N", title="Family"),
+                tooltip=["time_bucket:T", "event_family:N", "observation_rows:Q", "event_count:Q"],
+            )
+            .properties(height=320, title="SELinux volume over time")
+        )
+        selinux_detail_panel = mo.vstack(
+            [mo.md("### SELinux volume over time"), selinux_timeline_chart]
+        )
+    selinux_detail_panel
+    return
+
+
+@app.cell
+def _(
+    mo,
+    selinux_available,
+    selinux_avc_detail,
+    selinux_context_detail,
+    selinux_interaction_detail,
+    selinux_process_detail,
+    selinux_transition_detail,
+):
+    if selinux_available:
+        selinux_tables_panel = mo.vstack(
+            [
+                mo.md(
+                    "### Context detail\nTop observed nonblank contexts by producer `EventCount`; "
+                    "source/target and transition old/new roles remain distinct."
+                ),
+                mo.ui.table(selinux_context_detail, pagination=True),
+                mo.md("### AVC detail\nTop AVC summary groups by producer `EventCount`."),
+                mo.ui.table(selinux_avc_detail, pagination=True),
+                mo.md(
+                    "### Interaction detail\nTop folded/permission-expanded interaction groups; rows are not kernel-event counts."
+                ),
+                mo.ui.table(selinux_interaction_detail, pagination=True),
+                mo.md(
+                    "### Transition detail\nTop context-transition groups by producer `EventCount`."
+                ),
+                mo.ui.table(selinux_transition_detail, pagination=True),
+                mo.md(
+                    "### Process attribution detail\nAttribution outcomes remain separate so unmatched and ambiguous observations are not presented as owned by a process."
+                ),
+                mo.ui.table(selinux_process_detail, pagination=True),
+            ]
+        )
+    else:
+        selinux_tables_panel = mo.md(
+            "Detailed SELinux tables are unavailable until the SELinux DBT models are built."
+        )
+    selinux_tables_panel
     return
 
 
@@ -340,12 +663,17 @@ def _(alt, mo, timeline):
     if timeline.empty or "error" in timeline.columns:
         timeline_chart = mo.ui.table(timeline, pagination=False)
     else:
-        timeline_chart = alt.Chart(timeline).mark_bar().encode(
-            x=alt.X("time_chunk:T", title="Time"),
-            y=alt.Y("num_rows:Q", title="Rows / samples"),
-            color="event_type:N",
-            tooltip=["time_chunk:T", "event_type:N", "num_rows:Q"],
-        ).properties(height=320)
+        timeline_chart = (
+            alt.Chart(timeline)
+            .mark_bar()
+            .encode(
+                x=alt.X("time_chunk:T", title="Time"),
+                y=alt.Y("num_rows:Q", title="Rows / samples"),
+                color="event_type:N",
+                tooltip=["time_chunk:T", "event_type:N", "num_rows:Q"],
+            )
+            .properties(height=320)
+        )
     timeline_chart
     return
 
@@ -523,19 +851,45 @@ def _(con, mo, pidstat_available, query_df):
         full_width=True,
     )
     controls = mo.hstack(
-        [pidstat_metric, pidstat_aggregation, pidstat_host, pidstat_command_filter, pidstat_min_peak_metric, pidstat_max_series],
+        [
+            pidstat_metric,
+            pidstat_aggregation,
+            pidstat_host,
+            pidstat_command_filter,
+            pidstat_min_peak_metric,
+            pidstat_max_series,
+        ],
         widths=[0.16, 0.16, 0.2, 0.18, 0.14, 0.16],
     )
     if not pidstat_available:
-        pidstat_controls_panel = mo.vstack([controls, mo.md("No pidstat rows matched the current build.")])
+        pidstat_controls_panel = mo.vstack(
+            [controls, mo.md("No pidstat rows matched the current build.")]
+        )
     else:
         pidstat_controls_panel = mo.vstack([controls])
     pidstat_controls_panel
-    return pidstat_aggregation, pidstat_command_filter, pidstat_host, pidstat_max_series, pidstat_metric, pidstat_min_peak_metric
+    return (
+        pidstat_aggregation,
+        pidstat_command_filter,
+        pidstat_host,
+        pidstat_max_series,
+        pidstat_metric,
+        pidstat_min_peak_metric,
+    )
 
 
 @app.cell
-def _(con, pidstat_aggregation, pidstat_available, pidstat_command_filter, pidstat_host, pidstat_max_series, pidstat_metric, pidstat_min_peak_metric, query_df):
+def _(
+    con,
+    pidstat_aggregation,
+    pidstat_available,
+    pidstat_command_filter,
+    pidstat_host,
+    pidstat_max_series,
+    pidstat_metric,
+    pidstat_min_peak_metric,
+    query_df,
+):
     pidstat_metric_columns = {
         "CPU (core-summed %)": "cpu_core_percent",
         "Memory %": "mem_percent",
@@ -563,10 +917,15 @@ def _(con, pidstat_aggregation, pidstat_available, pidstat_command_filter, pidst
     pidstat_command_filter_sql = ""
     if pidstat_command_filter_value:
         selected_pidstat_command = pidstat_command_filter_value.replace("'", "''")
-        pidstat_command_filter_sql = f"and lower(command) like lower('%{selected_pidstat_command}%')"
+        pidstat_command_filter_sql = (
+            f"and lower(command) like lower('%{selected_pidstat_command}%')"
+        )
 
     if not pidstat_available:
-        pidstat_timeseries = query_df(con, "select cast(null as timestamp) as time_bucket, cast(null as varchar) as process_label, cast(null as double) as metric_value, cast(null as bigint) as concurrent_pids where false")
+        pidstat_timeseries = query_df(
+            con,
+            "select cast(null as timestamp) as time_bucket, cast(null as varchar) as process_label, cast(null as double) as metric_value, cast(null as bigint) as concurrent_pids where false",
+        )
     elif pidstat_aggregation_mode == "Aggregate by command":
         pidstat_timeseries = query_df(
             con,
@@ -679,9 +1038,22 @@ def _(con, pidstat_aggregation, pidstat_available, pidstat_command_filter, pidst
 
 
 @app.cell
-def _(go, mo, pidstat_aggregation_mode, pidstat_available, pidstat_command_filter_value, pidstat_host_value, pidstat_metric_label, pidstat_peak_metric_threshold, pidstat_series_limit, pidstat_timeseries):
+def _(
+    go,
+    mo,
+    pidstat_aggregation_mode,
+    pidstat_available,
+    pidstat_command_filter_value,
+    pidstat_host_value,
+    pidstat_metric_label,
+    pidstat_peak_metric_threshold,
+    pidstat_series_limit,
+    pidstat_timeseries,
+):
     if not pidstat_available:
-        pidstat_chart = mo.md("Pidstat time series is unavailable because the current build has no pidstat rows.")
+        pidstat_chart = mo.md(
+            "Pidstat time series is unavailable because the current build has no pidstat rows."
+        )
     elif pidstat_timeseries.empty or "error" in pidstat_timeseries.columns:
         pidstat_chart = mo.ui.table(pidstat_timeseries, pagination=False)
     else:
@@ -701,7 +1073,9 @@ def _(go, mo, pidstat_aggregation_mode, pidstat_available, pidstat_command_filte
                         "Peak selected metric=%{customdata[1]:.2f}<br>"
                         "Concurrent PIDs=%{customdata[2]}<extra></extra>"
                     ),
-                    customdata=process_df[["samples", "peak_metric_value", "concurrent_pids"]].to_numpy(),
+                    customdata=process_df[
+                        ["samples", "peak_metric_value", "concurrent_pids"]
+                    ].to_numpy(),
                 )
             )
         pidstat_figure.update_layout(
@@ -804,7 +1178,9 @@ def _(con, pidstat_available, pidstat_host_value, query_df):
 @app.cell
 def _(go, make_subplots, mo, pidstat_available, pidstat_event_volume, pidstat_host_value):
     if not pidstat_available:
-        pidstat_event_chart = mo.md("Event-volume comparison is unavailable because the current build has no pidstat rows.")
+        pidstat_event_chart = mo.md(
+            "Event-volume comparison is unavailable because the current build has no pidstat rows."
+        )
     elif pidstat_event_volume.empty or "error" in pidstat_event_volume.columns:
         pidstat_event_chart = mo.ui.table(pidstat_event_volume, pagination=False)
     else:
@@ -828,8 +1204,7 @@ def _(go, make_subplots, mo, pidstat_available, pidstat_event_volume, pidstat_ho
                         "Time=%{x}<br>"
                         "Event count=%{y:.0f}<extra></extra>"
                     ),
-                )
-                ,
+                ),
                 row=row_num,
                 col=1,
             )
@@ -840,7 +1215,9 @@ def _(go, make_subplots, mo, pidstat_available, pidstat_event_volume, pidstat_ho
             hovermode="x unified",
             showlegend=False,
         )
-        pidstat_event_figure.update_xaxes(title_text="Time", rangeslider_visible=True, row=len(event_groups), col=1)
+        pidstat_event_figure.update_xaxes(
+            title_text="Time", rangeslider_visible=True, row=len(event_groups), col=1
+        )
         pidstat_event_chart = pidstat_event_figure
     pidstat_event_panel = mo.vstack(
         [

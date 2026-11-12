@@ -7,11 +7,13 @@ DBT_DIR=wintap_dbt
 DBT=$(DBT_UV_RUN) --project . dbt
 
 WINTAP_DBT_DATASET ?= $(WINTAP_DATA_ROOT)
+WINTAP_DBT_RAW_SENSOR_DATASET ?= $(WINTAP_DBT_DATASET)
 WINTAP_DBT_DATABASE ?= $(WINTAP_DATA_ROOT)/duckdb/wintap.duckdb
-WINTAP_DBT_START_DAY ?= $(shell if [ -n "$(WINTAP_DATA_ROOT)" ] && [ -d "$(WINTAP_DATA_ROOT)/raw_sensor" ]; then find "$(WINTAP_DATA_ROOT)/raw_sensor" -type d -name 'dayPK=*' 2>/dev/null | sed 's|.*/dayPK=||' | sort | head -1; fi)
-WINTAP_DBT_END_DAY ?= $(shell if [ -n "$(WINTAP_DATA_ROOT)" ] && [ -d "$(WINTAP_DATA_ROOT)/raw_sensor" ]; then find "$(WINTAP_DATA_ROOT)/raw_sensor" -type d -name 'dayPK=*' 2>/dev/null | sed 's|.*/dayPK=||' | sort | tail -1; fi)
+WINTAP_DBT_START_DAY ?= $(if $(findstring ://,$(WINTAP_DBT_RAW_SENSOR_DATASET)),,$(shell if [ -d "$(WINTAP_DBT_RAW_SENSOR_DATASET)/raw_sensor" ]; then find "$(WINTAP_DBT_RAW_SENSOR_DATASET)/raw_sensor" -type d -name 'dayPK=*' 2>/dev/null | sed 's|.*/dayPK=||' | sort | head -1; fi))
+WINTAP_DBT_END_DAY ?= $(if $(findstring ://,$(WINTAP_DBT_RAW_SENSOR_DATASET)),,$(shell if [ -d "$(WINTAP_DBT_RAW_SENSOR_DATASET)/raw_sensor" ]; then find "$(WINTAP_DBT_RAW_SENSOR_DATASET)/raw_sensor" -type d -name 'dayPK=*' 2>/dev/null | sed 's|.*/dayPK=||' | sort | tail -1; fi))
 
 export WINTAP_DBT_DATASET
+export WINTAP_DBT_RAW_SENSOR_DATASET
 export WINTAP_DBT_DATABASE
 export WINTAP_DBT_START_DAY
 export WINTAP_DBT_END_DAY
@@ -59,26 +61,30 @@ requirements:
 cleanpynb:
 	$(UV_RUN) nbstripout --install --attributes .gitattributes
 
+dbt-check-output:
+	@$(DBT_UV_RUN) --project . python scripts/check_dbt_config.py --output-only
+
 dbt-check-config:
-	@test -n "$$WINTAP_DATA_ROOT" || (echo "WINTAP_DATA_ROOT is required" && exit 1)
-	@test -n "$$WINTAP_DBT_DATASET" || (echo "WINTAP_DBT_DATASET is required" && exit 1)
-	@test -n "$$WINTAP_DBT_DATABASE" || (echo "WINTAP_DBT_DATABASE is required" && exit 1)
-	@test -n "$$WINTAP_DBT_START_DAY" || (echo "WINTAP_DBT_START_DAY is required" && exit 1)
-	@test -n "$$WINTAP_DBT_END_DAY" || (echo "WINTAP_DBT_END_DAY is required" && exit 1)
-	@test -d "$$WINTAP_DBT_DATASET/raw_sensor" || (echo "$$WINTAP_DBT_DATASET/raw_sensor does not exist" && exit 1)
-	@mkdir -p "$$(dirname "$$WINTAP_DBT_DATABASE")"
+	@$(DBT_UV_RUN) --project . python scripts/check_dbt_config.py
 
 print-dbt-config: dbt-check-config
 	@echo "WINTAP_DATA_ROOT=$$WINTAP_DATA_ROOT"
 	@echo "WINTAP_DBT_DATASET=$$WINTAP_DBT_DATASET"
+	@echo "WINTAP_DBT_RAW_SENSOR_DATASET=$$WINTAP_DBT_RAW_SENSOR_DATASET"
+	@case "$$WINTAP_DBT_RAW_SENSOR_DATASET" in s3://*) echo "RAW_SOURCE_TYPE=s3";; *) echo "RAW_SOURCE_TYPE=local";; esac
 	@echo "WINTAP_DBT_DATABASE=$$WINTAP_DBT_DATABASE"
 	@echo "WINTAP_DBT_START_DAY=$$WINTAP_DBT_START_DAY"
 	@echo "WINTAP_DBT_END_DAY=$$WINTAP_DBT_END_DAY"
+	@echo "WINTAP_DBT_START_HOUR=$$WINTAP_DBT_START_HOUR"
+	@echo "WINTAP_DBT_END_HOUR=$$WINTAP_DBT_END_HOUR"
+
+dbt-check-source: dbt-check-config
+	$(DBT) run-operation validate_raw_sensor_source --project-dir $(DBT_DIR) --profiles-dir $(DBT_DIR)
 
 dbt-debug: dbt-check-config
 	$(DBT) debug --project-dir $(DBT_DIR) --profiles-dir $(DBT_DIR)
 
-dbt-build: dbt-check-config
+dbt-build: dbt-check-source
 	$(DBT) build --project-dir $(DBT_DIR) --profiles-dir $(DBT_DIR)
 
 dbt-test: dbt-check-config
@@ -90,10 +96,10 @@ dbt-docs: dbt-check-config
 qa-pid-hash: dbt-check-config
 	duckdb -cmd ".maxwidth 240" "$$WINTAP_DBT_DATABASE" < $(DBT_DIR)/qa/pid_hash_orphan_checks.sql
 
-qa-dashboard: dbt-check-config
+qa-dashboard: dbt-check-output
 	$(DBT_UV_RUN) --project . marimo run notebooks/wintap_dbt_overview.py
 
-qa-pidstat: dbt-check-config
+qa-pidstat: dbt-check-output
 	$(DBT_UV_RUN) --project . marimo run ../Lintap/teletap/grokdata_marimo.py
 
-.PHONY: fmt fmt-check lint test ci venv rebuild-venv build clean source-install setup requirements cleanpynb dbt-check-config print-dbt-config dbt-debug dbt-build dbt-test dbt-docs qa-pid-hash qa-dashboard
+.PHONY: fmt fmt-check lint test ci venv rebuild-venv build clean source-install setup requirements cleanpynb dbt-check-output dbt-check-config dbt-check-source print-dbt-config dbt-debug dbt-build dbt-test dbt-docs qa-pid-hash qa-dashboard qa-pidstat

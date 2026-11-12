@@ -31,7 +31,60 @@ WINTAP_DBT_END_DAY=<maximum discovered dayPK>
 
 You can still export any of those variables to override the defaults. DBT itself requires `WINTAP_DBT_DATASET`, `WINTAP_DBT_START_DAY`, `WINTAP_DBT_END_DAY`, and `WINTAP_DBT_DATABASE`; the Makefile fills them from `WINTAP_DATA_ROOT` for normal runs.
 
-For split I/O, keep `WINTAP_DBT_DATABASE` local and point `WINTAP_DBT_RAW_SENSOR_DATASET` at the parquet dataset root that contains `raw_sensor/`. If that raw dataset lives on S3, the dbt DuckDB profile now loads `httpfs` and configures an S3 secret from the usual AWS environment variables. For Garage/path-style endpoints, also set `AWS_ENDPOINT_URL`, `AWS_DEFAULT_REGION` or `AWS_REGION`, and `DUCKDB_USE_SSL`.
+For split I/O, keep `WINTAP_DBT_DATABASE` local and point `WINTAP_DBT_RAW_SENSOR_DATASET` at the parquet dataset root that contains `raw_sensor/`. If that raw dataset lives on S3, the dbt DuckDB profile now loads `httpfs` and configures an S3 secret from the usual AWS environment variables. Set `AWS_PROFILE` to select a named shared AWS profile; DBT passes it explicitly to DuckDB's credential-chain secret. DuckDB does not copy a profile's custom `endpoint_url` into the secret, so Garage/path-style users must also set `AWS_ENDPOINT_URL`, `AWS_DEFAULT_REGION` or `AWS_REGION`, and `DUCKDB_USE_SSL` to match that endpoint.
+
+Date discovery uses the **effective local raw input root**, not the output root.
+S3 input requires explicit `WINTAP_DBT_START_DAY` and `WINTAP_DBT_END_DAY`.
+No local `raw_sensor/` placeholder or downloaded copy is required for S3:
+
+```sh
+export WINTAP_DATA_ROOT="$HOME/wintap-analysis/rhel8"
+export WINTAP_DBT_DATASET="$WINTAP_DATA_ROOT"
+export WINTAP_DBT_DATABASE="$WINTAP_DATA_ROOT/duckdb/wintap.duckdb"
+export WINTAP_DBT_RAW_SENSOR_DATASET="s3://lintap-alpha/lintap"
+export WINTAP_DBT_START_DAY=20261031
+export WINTAP_DBT_END_DAY=20261103
+# For a named profile with a configured S3-compatible endpoint:
+export AWS_PROFILE=lintap-alpha
+export AWS_DEFAULT_REGION="$(aws configure get region --profile "$AWS_PROFILE")"
+export AWS_ENDPOINT_URL="$(aws configure get endpoint_url --profile "$AWS_PROFILE")"
+case "$AWS_ENDPOINT_URL" in
+  https://*) export DUCKDB_USE_SSL=true ;;
+  http://*) export DUCKDB_USE_SSL=false ;;
+esac
+make print-dbt-config
+make dbt-check-source
+make dbt-build
+```
+
+The raw root above resolves to `s3://lintap-alpha/lintap/raw_sensor/...`;
+do not append `raw_sensor` or an event name to the configured root.
+
+### Validation targets
+
+- `dbt-check-config`: offline source/configuration checks. Local raw input must
+  have a readable `raw_sensor/` directory; S3 requires a valid bucket/prefix URI,
+  not a local directory. Other URI schemes are rejected. Dates/hours are checked,
+  and the local DuckDB parent directory is created and checked for writability.
+- `print-dbt-config`: the same offline checks plus the effective raw source,
+  source type and date/hour window. It does not print credentials.
+- `dbt-check-source`: uses a DBT operation and the existing DuckDB S3 secret
+  configuration to list supported bronze event/alias Parquet files within the
+  requested partitions and read one matching file's schema. No AWS CLI is needed.
+  Listing stops after finding a sample; it does not scan all data or check every
+  file. Missing optional events remain valid, but no supported event files
+  anywhere in the requested window is an error. Access/endpoint/TLS and corrupt
+  sample errors retain DuckDB's diagnostics, rather than becoming "empty input".
+- `dbt-build`: automatically runs configuration and source checks before building.
+- `qa-dashboard` / `qa-pidstat`: require an existing local database, not reachable
+  raw input or a date window. Opening materialized results works offline; queries
+  against raw-backed bronze views still require raw-source access.
+
+The probe knows the current bronze input names and historical aliases; new bronze
+events must also be added to `macros/validate_source.sql`. S3 LIST prefixes include
+the event and requested day (and hour, when configured). Large windows can still
+require multiple listings. A successful probe is basic access evidence, **not** a
+full dataset-integrity or model-compatibility qualification.
 
 Raw parquet scans also narrow their file globs to the requested `dayPK=` partitions from `WINTAP_DBT_START_DAY` through `WINTAP_DBT_END_DAY`, which helps when reading a small window out of a much larger remote dataset. The compile-time raw-event alias and optional-column checks use the same narrowed day partition set instead of probing the full event prefix.
 
@@ -118,6 +171,33 @@ System.Runtime cpu-usage`. The gold `max_cpu_percent`/`avg_cpu_percent` and
 monitoring `max_cpu` columns remain compatibility aliases of these core-summed
 values; new queries should use the explicit `*_cpu_core_percent` names.
 
+### SELinux telemetry
+
+Optional `raw_selinuxavc`, `raw_selinuxinteraction`, and `raw_selinuxtransition`
+sources produce typed empty relations when absent. Each family has bronze staging,
+normalized silver detail, and gold summaries; `selinux_event_detail`,
+`selinux_context`, and `selinux_process_summary` provide shared analysis views.
+The QA dashboard reports family counts, contexts, and attribution coverage.
+
+`EventTime` is Unix seconds; `FirstSeen`/`LastSeen` are FILETIME. Silver retains
+raw values and normalizes timestamps. Bronze removes identical rows and records
+`num_dups`; silver/gold preserve producer `EventCount` rather than multiplying it
+by duplicate counts. Interaction output is folded/permission-expanded: neither
+its rows nor its `EventCount` should be presented as distinct kernel events.
+Attribution accepts exact identity or a single host/PID/lifetime candidate;
+ambiguous and unmatched observations remain visible without assigned ownership.
+
+### Temporary network identity compatibility change
+
+`process_conn_incr.conn_id` currently replaces producer `connid` with an uppercase
+MD5 of a canonical JSON five-tuple (protocol and ordered IP/port endpoint pairs,
+with context `llnl`). Reversed endpoints share an ID; missing tuple fields yield
+NULL. This is a temporary DBT validation shim, **not** the authoritative Wintap
+.NET implementation or a connection-instance identity: repeated uses of the same
+five-tuple share the key. Existing IDs and joins to producer IDs can change;
+rebuild dependent models together and review downstream consumers before release.
+See `macros/network_keys.sql` and `tests/temporary_five_tuple_conn_id_contract.sql`.
+
 ## Layers
 
 - `models/bronze` — raw parquet scans and compatibility layer.
@@ -145,3 +225,15 @@ Implemented:
 - Parquet export is not implemented yet; DBT builds into DuckDB.
 - Label/Sigma/MITRE/LOLBAS source loading is stubbed for now.
 - The historical `merged` flow is intentionally not supported here.
+
+### Combined-feature release follow-up
+
+- Qualify full builds/tests against representative split-local and authenticated
+  S3 inputs, including SELinux families. A successful source preflight alone is
+  not a full build or all-file integrity check.
+- Approve the temporary network-ID compatibility change and track migration to
+  the authoritative producer implementation.
+- Harden/test `scripts/lintap-pull-s3.sh` before treating it as a supported release
+  interface: calendar/date-order checks, GNU/BSD date behavior, discovery errors,
+  literal host filtering, and configurable defaults. `-n` prevents sync writes
+  but still makes discovery/list requests when event types are omitted.

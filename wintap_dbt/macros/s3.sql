@@ -8,6 +8,7 @@
     {%- set aws_endpoint_url = env_var('AWS_ENDPOINT_URL', '') -%}
     {%- set duckdb_endpoint = aws_endpoint_url | replace('https://', '') | replace('http://', '') -%}
     {%- set duckdb_region = env_var('AWS_DEFAULT_REGION', env_var('AWS_REGION', '')) -%}
+    {%- set aws_profile = env_var('AWS_PROFILE', '') -%}
     {%- set duckdb_use_ssl = env_var('DUCKDB_USE_SSL', 'true') -%}
     {%- set use_ssl = duckdb_use_ssl | lower in ['1', 'true', 'yes', 'on'] -%}
     {%- set clauses = [
@@ -15,6 +16,11 @@
         'PROVIDER CREDENTIAL_CHAIN'
     ] -%}
 
+    {%- if aws_profile -%}
+        {%- set escaped_aws_profile = aws_profile | replace("'", "''") -%}
+        {% do clauses.append("CHAIN 'config'") %}
+        {% do clauses.append("PROFILE '" ~ escaped_aws_profile ~ "'") %}
+    {%- endif -%}
     {%- if duckdb_region -%}
         {% do clauses.append("REGION '" ~ duckdb_region ~ "'") %}
     {%- endif -%}
