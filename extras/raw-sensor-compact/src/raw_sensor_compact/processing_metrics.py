@@ -10,7 +10,7 @@ from tempfile import NamedTemporaryFile, TemporaryDirectory
 from .config import CompactionError
 from .inventory import Inventory, Store
 
-VERSION = "1"
+VERSION = "2"
 SCHEMA = {
     "metric_version": "VARCHAR",
     "run_id": "VARCHAR",
@@ -29,6 +29,11 @@ SCHEMA = {
     "entity_bootstrap_start": "VARCHAR",
     "entity_snapshot_hashes": "VARCHAR",
     "entity_input_fingerprint": "VARCHAR",
+    "identity_policy": "VARCHAR",
+    "identity_exclusion_rows": "BIGINT",
+    "identity_exclusion_fingerprint": "VARCHAR",
+    "identity_exclusion_reasons": "VARCHAR",
+    "identity_exclusion_hosts": "VARCHAR",
     "process_source_fingerprint": "VARCHAR",
     "process_compacted_fingerprint": "VARCHAR",
     "raw_status": "VARCHAR",
@@ -144,6 +149,8 @@ def metric_rows(
     )
     entity_bootstrap_start = bootstrap_starts[0] if bootstrap_starts else ""
     input_fingerprint = entity_report.get("process_input_fingerprint", "")
+    identity_report = entity_report.get("identity_exclusions", {})
+    identity_policy = identity_report.get("policy", "reject")
 
     rows = []
     for hour in hours:
@@ -168,6 +175,9 @@ def metric_rows(
         )
         source = inventory_hour_stats(source_inventory, hour)
         compacted = inventory_hour_stats(compacted_inventory, hour)
+        identity_hour = identity_report.get("hours", {}).get(
+            hour.strftime("%Y%m%d%H"), {}
+        )
         rows.append(
             {
                 "metric_version": VERSION,
@@ -189,6 +199,17 @@ def metric_rows(
                 "entity_bootstrap_start": entity_bootstrap_start,
                 "entity_snapshot_hashes": json.dumps(entity_hashes, sort_keys=True),
                 "entity_input_fingerprint": input_fingerprint,
+                "identity_policy": identity_policy,
+                "identity_exclusion_rows": int(identity_hour.get("rows", 0) or 0),
+                "identity_exclusion_fingerprint": identity_hour.get(
+                    "fingerprint", ""
+                ),
+                "identity_exclusion_reasons": json.dumps(
+                    identity_hour.get("reasons", {}), sort_keys=True
+                ),
+                "identity_exclusion_hosts": json.dumps(
+                    identity_hour.get("hosts", {}), sort_keys=True
+                ),
                 "process_source_fingerprint": source["fingerprint"],
                 "process_compacted_fingerprint": compacted["fingerprint"],
                 "raw_status": raw_status,

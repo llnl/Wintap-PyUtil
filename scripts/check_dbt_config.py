@@ -72,6 +72,11 @@ def validate(env, output_only=False):
     if a.startswith(b) or b.startswith(a):
         raise ValueError("Raw and compacted input roots must not overlap")
     entity = env.get("WINTAP_DBT_PROCESS_ENTITY_ROOT", "").rstrip("/")
+    identity_policy = env.get("WINTAP_DBT_PROCESS_UNKNOWN_IDENTITY_POLICY", "reject").strip()
+    if identity_policy not in {"reject", "quarantine"}:
+        raise ValueError(
+            "WINTAP_DBT_PROCESS_UNKNOWN_IDENTITY_POLICY must be reject or quarantine"
+        )
     if entity:
         entity_kind = source_type(entity)
         entity_path = str(Path(entity).resolve()) if entity_kind == "local" else entity

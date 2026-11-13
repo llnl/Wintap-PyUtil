@@ -1,16 +1,15 @@
-import itertools
 import io
+import itertools
 from pathlib import Path
 
 import pytest
 from botocore.exceptions import ClientError
 
-from raw_sensor_compact.config import CompactionError, Dataset, Limits, hour_window
 from raw_sensor_compact.compaction import process_hours
+from raw_sensor_compact.config import CompactionError, Dataset, Limits, hour_window
 from raw_sensor_compact.entities import EntityLimits, Evidence, unknown_hash
 from raw_sensor_compact.entity_store import EntityStore, update_entities
 from raw_sensor_compact.inventory import Store
-
 
 HOURS = hour_window("2026-01-01T00:00:00Z", "2026-01-01T02:00:00Z")
 
@@ -148,6 +147,31 @@ def test_unknown_identity_fails_closed(conn, stores, changes):
     with pytest.raises(CompactionError):
         update_entities(conn, source, compacted, entities, HOURS, ["HOST"], initialize=True)
     assert path.exists() and not list(Path(entities.store.dataset.root).glob("**/*.parquet"))
+
+
+def test_unknown_identity_quarantine_is_explicit_and_not_published(conn, stores, tmp_path):
+    source, compacted, entities = stores
+    seed(conn, source)
+    excluded = seed(
+        conn, source, observation(pidhash="unknown"), filename="excluded.parquet"
+    )
+    report, _ = update_entities(
+        conn,
+        source,
+        compacted,
+        entities,
+        HOURS,
+        ["HOST"],
+        initialize=True,
+        identity_policy="quarantine",
+    )
+    exclusions = report["identity_exclusions"]
+    assert exclusions["policy"] == "quarantine"
+    assert exclusions["rows"] == 1
+    assert exclusions["reasons"] == {"unknown_pid_hash": 1}
+    assert exclusions["fingerprint"]
+    assert excluded.exists()
+    assert set(state(conn, entities, tmp_path)) == {"child"}
 
 
 def test_plan_read_only_and_resource_failure(conn, stores):

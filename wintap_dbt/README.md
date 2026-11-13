@@ -13,6 +13,7 @@ snapshots independently of the analysis window:
 export WINTAP_DBT_PROCESS_ENTITY_ROOT=s3://bucket/dataset/process_entities
 export WINTAP_DBT_PROCESS_ENTITY_HOSTS=HOST-A,HOST-B
 export WINTAP_DBT_PROCESS_ENTITY_NAMESPACE=pid-v2-dataset-one
+export WINTAP_DBT_PROCESS_UNKNOWN_IDENTITY_POLICY=reject
 export WINTAP_DBT_PROCESSING_METRICS_ROOT=s3://bucket/dataset/processing_metrics
 ```
 
@@ -24,6 +25,13 @@ files, incompatible schema/host/namespace, invalid JSON evidence, contradictory
 stored parent scalars, missing processing metrics, or uncovered `raw_process` hours
 fail preflight. No automatic empty-state fallback. The metrics root defaults to the
 `processing_metrics` sibling of `WINTAP_DBT_RAW_SENSOR_DATASET`.
+
+`WINTAP_DBT_PROCESS_UNKNOWN_IDENTITY_POLICY` defaults to `reject` and must match
+the writer policy recorded in every checkpoint. `quarantine` is an explicit
+exception: unknown-identity raw evidence remains available to bronze/raw QA but
+is not loaded into durable entity state. Checkpoint exclusion counts, reasons,
+hosts and fingerprints are retained for review; quarantine does not repair keys
+or create ancestors.
 
 `stg_process_entities` materializes the validated state and bootstrap provenance.
 `process_entities` resolves paired parents from retained plus current-window

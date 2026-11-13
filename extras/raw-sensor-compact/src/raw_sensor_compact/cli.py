@@ -99,6 +99,15 @@ def parser() -> argparse.ArgumentParser:
         )
         command.add_argument("--entity-host", action="append", default=[])
         command.add_argument("--entity-namespace")
+        command.add_argument(
+            "--unknown-identity-policy",
+            choices=("reject", "quarantine"),
+            default="reject",
+            help=(
+                "How entity mode handles unknown process identities; reject is "
+                "the safe default, quarantine retains explicit non-entity evidence"
+            ),
+        )
         command.add_argument("--max-entity-rows", type=int, default=1_000_000)
         command.add_argument("--max-entity-bytes", type=int, default=256 * 1024 * 1024)
         if name == "entities-init":
@@ -272,6 +281,7 @@ def run(args) -> tuple[dict, int]:
                     allow_empty=getattr(args, "allow_empty_host", False),
                     max_files=limits.max_files,
                     resume_init=getattr(args, "resume_init", False),
+                    identity_policy=args.unknown_identity_policy,
                 )
                 if args.command.startswith("entities-"):
                     if args.command in {"entities-init", "entities-replay"}:

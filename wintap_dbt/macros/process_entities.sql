@@ -65,6 +65,10 @@
 
 {% macro validate_processing_metrics(bootstrap_starts) -%}
     {% if not execute or not env_var('WINTAP_DBT_PROCESS_ENTITY_ROOT', '') %}{{ return('') }}{% endif %}
+    {% set identity_policy = env_var('WINTAP_DBT_PROCESS_UNKNOWN_IDENTITY_POLICY', 'reject') %}
+    {% if identity_policy not in ['reject', 'quarantine'] %}
+        {{ exceptions.raise_compiler_error('PROCESS_UNKNOWN_IDENTITY_POLICY must be reject or quarantine') }}
+    {% endif %}
     {% if not raw_event_exists('raw_process') %}
         {{ exceptions.raise_compiler_error('Durable entity coverage requires raw_process input in the DBT window') }}
     {% endif %}
@@ -82,13 +86,14 @@
         ), metrics as (
             select
                 try_strptime(hour_start, '%Y-%m-%dT%H:00:00Z') as hour_start,
-                status, metric_version, entity_mode, entity_namespace
+                status, metric_version, entity_mode, entity_namespace,
+                identity_policy, coalesce(identity_exclusion_rows, 0) as identity_exclusion_rows
             from read_parquet('{{ metric_glob }}', hive_partitioning=false, union_by_name=true)
         ), joined as (
             select r.hour_start,
                    count(m.hour_start) as metric_rows,
                    count(m.hour_start) filter(where m.status not in ('completed', 'completed_with_deletion_errors')) as bad_rows,
-                   count(m.hour_start) filter(where m.metric_version != '1' or not m.entity_mode or m.entity_namespace != '{{ env_var('WINTAP_DBT_PROCESS_ENTITY_NAMESPACE') | replace("'", "''") }}') as invalid_rows
+                   count(m.hour_start) filter(where m.metric_version != '2' or not m.entity_mode or m.entity_namespace != '{{ env_var('WINTAP_DBT_PROCESS_ENTITY_NAMESPACE') | replace("'", "''") }}' or m.identity_policy != '{{ identity_policy }}' or ('{{ identity_policy }}' = 'reject' and m.identity_exclusion_rows != 0)) as invalid_rows
             from required r left join metrics m using(hour_start)
             group by r.hour_start
         )

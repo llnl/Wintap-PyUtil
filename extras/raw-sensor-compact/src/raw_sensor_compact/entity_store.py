@@ -254,6 +254,7 @@ def update_entities(
     allow_empty=False,
     max_files=10000,
     resume_init=False,
+    identity_policy="reject",
 ):
     """Prepare all hosts, recheck every input, publish/verify; no source deletion."""
     from .entities import load_inputs
@@ -275,7 +276,9 @@ def update_entities(
         raise CompactionError(
             "Entity archive file limit exceeded; inputs not truncated"
         )
-    load_inputs(conn, inventories)
+    identity_exclusions = load_inputs(
+        conn, inventories, identity_policy=identity_policy
+    )
     observed = {
         r[0]
         for r in conn.execute("SELECT DISTINCT hostname FROM entity_input").fetchall()
@@ -294,6 +297,7 @@ def update_entities(
                 [inventory.fingerprint for inventory in inventories], sort_keys=True
             ).encode()
         ).hexdigest(),
+        "identity_exclusions": identity_exclusions,
     }
     with TemporaryDirectory(prefix="process-entities-") as directory:
         directory = Path(directory)

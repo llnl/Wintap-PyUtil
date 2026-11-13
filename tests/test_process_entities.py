@@ -151,6 +151,7 @@ def test_missing_ancestor_and_nonroot_cycle_are_not_complete(env, tmp_path, mode
     ("WINTAP_DBT_PROCESS_ENTITY_ROOT", "raw_sensor"),
     ("WINTAP_DBT_PROCESS_ENTITY_NAMESPACE", ""),
     ("WINTAP_DBT_PROCESS_ENTITY_HOSTS", ""),
+    ("WINTAP_DBT_PROCESS_UNKNOWN_IDENTITY_POLICY", "invent"),
 ])
 def test_entity_config_guards(env, tmp_path, name, value):
     setup(env, tmp_path)

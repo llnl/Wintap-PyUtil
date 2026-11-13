@@ -2,12 +2,13 @@
 
 import hashlib
 import json
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 
 from .config import CompactionError
 
-
 VERSION = "1"
+IDENTITY_POLICIES = {"reject", "quarantine"}
 FIELDS = ("pids", "parents", "births", "stops", "names", "paths", "users", "args", "agents", "activities")
 SCHEMA = {
     "hostname": "VARCHAR", "pid_hash": "VARCHAR", "os_pid": "BIGINT",
@@ -47,6 +48,25 @@ def unknown(value, host):
         "", "UNKNOWN", "NA", "-1", "0", unknown_hash(host),
         "00000000000000000000000000000000",
     }
+
+
+def identity_reasons(row):
+    """Return explicit reasons a row cannot become durable entity state."""
+    hostname = row.get("hostname")
+    if not isinstance(hostname, str) or not hostname.strip() or any(
+        c in hostname for c in "\x00\n\r"
+    ):
+        return ("invalid_hostname",)
+    host = host_name(hostname)
+    reasons = []
+    if unknown(row.get("pidhash"), host):
+        reasons.append("unknown_pid_hash")
+    pid = row.get("pid")
+    if pid is None:
+        reasons.append("missing_pid")
+    elif pid < 0:
+        reasons.append("negative_pid")
+    return tuple(reasons)
 
 
 @dataclass(frozen=True)
@@ -180,14 +200,17 @@ def rows(conn, query, params=()):
     names = [c[0].lower() for c in cursor.description]
     while batch := cursor.fetchmany(1024):
         for values in batch:
-            yield dict(zip(names, values))
+            yield dict(zip(names, values, strict=False))
 
 
-def load_inputs(conn, inventories):
+def load_inputs(conn, inventories, *, identity_policy="reject"):
     """Validate physical schemas/partitions before projecting lifecycle evidence."""
     from .engine import check_hive_fields, schema
 
+    if identity_policy not in IDENTITY_POLICIES:
+        raise CompactionError("Unknown identity policy; use reject or quarantine")
     conn.execute("DROP TABLE IF EXISTS entity_input")
+    conn.execute("DROP TABLE IF EXISTS identity_exclusions")
     conn.execute("CREATE TEMP TABLE entity_input (hostname VARCHAR, pidhash VARCHAR, pid BIGINT, "
                  "parentpidhash VARCHAR, parentpid BIGINT, activitytype VARCHAR, eventtime BIGINT, "
                  "processname VARCHAR, processpath VARCHAR, username VARCHAR, processargs VARCHAR, "
@@ -212,11 +235,88 @@ def load_inputs(conn, inventories):
             conn.execute("INSERT INTO entity_input SELECT DISTINCT " + ",".join(projections) +
                          ", ? FROM read_parquet(?, union_by_name=true, hive_partitioning=false)",
                          [leaf.day + leaf.hour, uris])
-    for row in rows(conn, "SELECT DISTINCT hostname, pidhash, pid FROM entity_input"):
-        host = host_name(row["hostname"])
-        if unknown(row["pidhash"], host) or row["pid"] is None or row["pid"] < 0:
-            raise CompactionError("Unknown process instance identity; source evidence retained")
+    identity_where = (
+        "hostname IS NULL OR trim(hostname) = '' OR "
+        "instr(hostname, chr(10)) > 0 OR instr(hostname, chr(13)) > 0 OR "
+        "pidhash IS NULL OR upper(trim(pidhash)) IN "
+        "('', 'UNKNOWN', 'NA', '-1', '0', '00000000000000000000000000000000') OR "
+        "upper(trim(pidhash)) = upper(md5('N`Process`' || upper(md5("
+        "'Process_ID`llnl`0`' || upper(trim(hostname)) || '`-1`')) || '`')) OR "
+        "pid IS NULL OR pid < 0"
+    )
+    invalid = []
+    by_hour = defaultdict(list)
+    by_reason = Counter()
+    by_host = Counter()
+    for row in rows(conn, f"SELECT * FROM entity_input WHERE {identity_where}"):
+        reasons = identity_reasons(row)
+        if not reasons:
+            continue
+        record = {
+            "hostname": row["hostname"],
+            "pidhash": row["pidhash"],
+            "pid": row["pid"],
+            "parentpidhash": row["parentpidhash"],
+            "parentpid": row["parentpid"],
+            "activitytype": row["activitytype"],
+            "eventtime": row["eventtime"],
+            "partition": row["partition"],
+            "reasons": reasons,
+        }
+        invalid.append(record)
+        for reason in reasons:
+            by_reason[reason] += 1
+        host = (
+            host_name(row["hostname"])
+            if isinstance(row["hostname"], str) and row["hostname"].strip()
+            else "<invalid-hostname>"
+        )
+        by_host[host] += 1
+        by_hour[row["partition"]].append(record)
+
+    def fingerprint(records):
+        return hashlib.sha256(
+            "\n".join(canonical(record) for record in sorted(records, key=canonical)).encode()
+        ).hexdigest() if records else ""
+
+    hourly = {}
+    for partition, records in sorted(by_hour.items()):
+        hourly[partition] = {
+            "rows": len(records),
+            "fingerprint": fingerprint(records),
+            "reasons": dict(sorted(Counter(r for record in records for r in record["reasons"]).items())),
+            "hosts": dict(sorted(Counter(
+                (
+                    host_name(record["hostname"])
+                    if isinstance(record["hostname"], str) and record["hostname"].strip()
+                    else "<invalid-hostname>"
+                )
+                for record in records
+            ).items())),
+        }
+    exclusion_report = {
+        "policy": identity_policy,
+        "rows": len(invalid),
+        "fingerprint": fingerprint(invalid),
+        "reasons": dict(sorted(by_reason.items())),
+        "hosts": dict(sorted(by_host.items())),
+        "hours": hourly,
+    }
+    if invalid:
+        conn.execute(
+            "CREATE TEMP TABLE identity_exclusions AS "
+            f"SELECT * FROM entity_input WHERE {identity_where}"
+        )
+        if identity_policy == "reject":
+            raise CompactionError(
+                "Unknown process instance identity; source evidence retained; "
+                f"rows={len(invalid)} fingerprint={exclusion_report['fingerprint']}"
+            )
+        conn.execute(
+            f"DELETE FROM entity_input WHERE {identity_where}"
+        )
     conn.execute("UPDATE entity_input SET hostname=upper(trim(hostname))")
+    return exclusion_report
 
 
 SOURCE_COLUMNS = (
