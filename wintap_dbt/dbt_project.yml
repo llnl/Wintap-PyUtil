@@ -22,6 +22,7 @@ clean-targets:
 vars:
   dataset: "{{ env_var('WINTAP_DBT_DATASET') }}"
   raw_sensor_dataset: "{{ env_var('WINTAP_DBT_RAW_SENSOR_DATASET', env_var('WINTAP_DBT_DATASET')) }}"
+  compacted_root: "{{ env_var('WINTAP_DBT_COMPACTED_ROOT', '') }}"
   start_day: "{{ env_var('WINTAP_DBT_START_DAY') }}"
   end_day: "{{ env_var('WINTAP_DBT_END_DAY') }}"
   start_hour: "{{ env_var('WINTAP_DBT_START_HOUR', '') }}"

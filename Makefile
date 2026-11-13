@@ -8,12 +8,14 @@ DBT=$(DBT_UV_RUN) --project . dbt
 
 WINTAP_DBT_DATASET ?= $(WINTAP_DATA_ROOT)
 WINTAP_DBT_RAW_SENSOR_DATASET ?= $(WINTAP_DBT_DATASET)
+WINTAP_DBT_COMPACTED_ROOT ?= $(WINTAP_DBT_RAW_SENSOR_DATASET)/compacted
 WINTAP_DBT_DATABASE ?= $(WINTAP_DATA_ROOT)/duckdb/wintap.duckdb
-WINTAP_DBT_START_DAY ?= $(if $(findstring ://,$(WINTAP_DBT_RAW_SENSOR_DATASET)),,$(shell if [ -d "$(WINTAP_DBT_RAW_SENSOR_DATASET)/raw_sensor" ]; then find "$(WINTAP_DBT_RAW_SENSOR_DATASET)/raw_sensor" -type d -name 'dayPK=*' 2>/dev/null | sed 's|.*/dayPK=||' | sort | head -1; fi))
-WINTAP_DBT_END_DAY ?= $(if $(findstring ://,$(WINTAP_DBT_RAW_SENSOR_DATASET)),,$(shell if [ -d "$(WINTAP_DBT_RAW_SENSOR_DATASET)/raw_sensor" ]; then find "$(WINTAP_DBT_RAW_SENSOR_DATASET)/raw_sensor" -type d -name 'dayPK=*' 2>/dev/null | sed 's|.*/dayPK=||' | sort | tail -1; fi))
+WINTAP_DBT_START_DAY ?= $(if $(findstring ://,$(WINTAP_DBT_RAW_SENSOR_DATASET) $(WINTAP_DBT_COMPACTED_ROOT)),,$(shell for root in "$(WINTAP_DBT_RAW_SENSOR_DATASET)/raw_sensor" "$(WINTAP_DBT_COMPACTED_ROOT)"; do if [ -d "$$root" ]; then find "$$root" -type d -name 'dayPK=*' 2>/dev/null; fi; done | sed 's|.*/dayPK=||' | sort | head -1))
+WINTAP_DBT_END_DAY ?= $(if $(findstring ://,$(WINTAP_DBT_RAW_SENSOR_DATASET) $(WINTAP_DBT_COMPACTED_ROOT)),,$(shell for root in "$(WINTAP_DBT_RAW_SENSOR_DATASET)/raw_sensor" "$(WINTAP_DBT_COMPACTED_ROOT)"; do if [ -d "$$root" ]; then find "$$root" -type d -name 'dayPK=*' 2>/dev/null; fi; done | sed 's|.*/dayPK=||' | sort | tail -1))
 
 export WINTAP_DBT_DATASET
 export WINTAP_DBT_RAW_SENSOR_DATASET
+export WINTAP_DBT_COMPACTED_ROOT
 export WINTAP_DBT_DATABASE
 export WINTAP_DBT_START_DAY
 export WINTAP_DBT_END_DAY
@@ -71,6 +73,7 @@ print-dbt-config: dbt-check-config
 	@echo "WINTAP_DATA_ROOT=$$WINTAP_DATA_ROOT"
 	@echo "WINTAP_DBT_DATASET=$$WINTAP_DBT_DATASET"
 	@echo "WINTAP_DBT_RAW_SENSOR_DATASET=$$WINTAP_DBT_RAW_SENSOR_DATASET"
+	@echo "WINTAP_DBT_COMPACTED_ROOT=$$WINTAP_DBT_COMPACTED_ROOT"
 	@case "$$WINTAP_DBT_RAW_SENSOR_DATASET" in s3://*) echo "RAW_SOURCE_TYPE=s3";; *) echo "RAW_SOURCE_TYPE=local";; esac
 	@echo "WINTAP_DBT_DATABASE=$$WINTAP_DBT_DATABASE"
 	@echo "WINTAP_DBT_START_DAY=$$WINTAP_DBT_START_DAY"

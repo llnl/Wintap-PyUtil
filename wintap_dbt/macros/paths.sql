@@ -13,6 +13,15 @@
     {{ raw_sensor_dataset_path() }}/raw_sensor/{{ event_type }}
 {%- endmacro %}
 
+{# Direct compacted event root; default is a sibling of raw_sensor. #}
+{% macro compacted_root_path() -%}
+    {{ return(var('compacted_root', '').rstrip('/') or raw_sensor_dataset_path() ~ '/compacted') }}
+{%- endmacro %}
+
+{% macro raw_event_input_paths(event_type) -%}
+    {{ return([raw_sensor_path(event_type), compacted_root_path() ~ '/' ~ event_type]) }}
+{%- endmacro %}
+
 {# Build a recursive parquet glob for one raw_sensor event type. #}
 {% macro raw_sensor_glob(event_type) -%}
     {{ raw_sensor_path(event_type) }}/**/*.parquet
@@ -64,12 +73,12 @@
     {{ return(normalized_hour(var('end_hour'), '23')) }}
 {%- endmacro %}
 
-{# Build the requested day/hour parquet globs for one raw event type. #}
-{% macro raw_sensor_partition_globs(event_type) -%}
+{# Build partition globs for one physical event directory. #}
+{% macro partition_globs_for_path(event_path) -%}
     {%- set ns = namespace(globs=[]) -%}
     {%- if not hour_window_enabled() -%}
         {%- for day_pk in requested_day_pks() -%}
-            {% do ns.globs.append(raw_sensor_path(event_type) ~ '/dayPK=' ~ day_pk ~ '/**/*.parquet') %}
+            {% do ns.globs.append(event_path ~ '/dayPK=' ~ day_pk ~ '/**/*.parquet') %}
         {%- endfor -%}
         {{ return(ns.globs) }}
     {%- endif -%}
@@ -86,8 +95,17 @@
         {%- set day_start_hour = start_hour if day_pk == start_day else '00' -%}
         {%- set day_end_hour = end_hour if day_pk == end_day else '23' -%}
         {%- for hour_int in range(day_start_hour | int, (day_end_hour | int) + 1) -%}
-            {% do ns.globs.append(raw_sensor_path(event_type) ~ '/dayPK=' ~ day_pk ~ '/hourPK=' ~ ('%02d' % hour_int) ~ '/**/*.parquet') %}
+            {% do ns.globs.append(event_path ~ '/dayPK=' ~ day_pk ~ '/hourPK=' ~ ('%02d' % hour_int) ~ '/**/*.parquet') %}
         {%- endfor -%}
+    {%- endfor -%}
+    {{ return(ns.globs) }}
+{%- endmacro %}
+
+{# Scan both stores with UNION ALL semantics; no overlap suppression. #}
+{% macro raw_sensor_partition_globs(event_type) -%}
+    {%- set ns = namespace(globs=[]) -%}
+    {%- for event_path in raw_event_input_paths(event_type) -%}
+        {% do ns.globs.extend(partition_globs_for_path(event_path)) %}
     {%- endfor -%}
     {{ return(ns.globs) }}
 {%- endmacro %}
@@ -103,7 +121,7 @@
     {%- for glob_path in requested_globs -%}
         {%- set sql -%}
             select count(*) as num_files
-            from glob('{{ glob_path }}')
+            from glob('{{ glob_path | replace("'", "''") }}')
         {%- endset -%}
         {%- set results = run_query(sql) -%}
         {%- if results is not none and results|length > 0 and results.columns[0].values()[0] > 0 -%}
@@ -126,11 +144,11 @@
 {# Render one or more globs as SQL for DuckDB parquet_scan/glob calls. #}
 {% macro raw_globs_sql(globs) -%}
     {%- if globs | length == 1 -%}
-        '{{ globs[0] }}'
+        '{{ globs[0] | replace("'", "''") }}'
     {%- else -%}
         [
         {%- for glob_path in globs -%}
-            '{{ glob_path }}'{% if not loop.last %}, {% endif %}
+            '{{ glob_path | replace("'", "''") }}'{% if not loop.last %}, {% endif %}
         {%- endfor -%}
         ]
     {%- endif -%}

@@ -59,17 +59,37 @@ def validate(env, output_only=False):
     if not source.strip():
         raise ValueError("WINTAP_DBT_RAW_SENSOR_DATASET must not be empty")
     kind = source_type(source)
-    if kind == "local":
-        raw = Path(source) / "raw_sensor"
-        if not raw.is_dir() or not os.access(raw, os.R_OK | os.X_OK):
-            raise ValueError(f"Local raw source directory does not exist or is not readable: {raw}")
+    compacted = (
+        env.get("WINTAP_DBT_COMPACTED_ROOT", "").rstrip("/") or source.rstrip("/") + "/compacted"
+    )
+    compacted_kind = source_type(compacted)
+    raw = source.rstrip("/") + "/raw_sensor"
+    # Do not accidentally read one namespace twice through overlapping roots.
+    roots = [raw, compacted]
+    if kind == compacted_kind == "local":
+        roots = [str(Path(root).resolve()) for root in roots]
+    a, b = (root.rstrip("/") + "/" for root in roots)
+    if a.startswith(b) or b.startswith(a):
+        raise ValueError("Raw and compacted input roots must not overlap")
+    present = False
+    for root, root_kind in ((raw, kind), (compacted, compacted_kind)):
+        if root_kind == "s3":
+            present = True  # Actual S3 existence/access is checked by DBT.
+        elif Path(root).exists():
+            if not Path(root).is_dir() or not os.access(root, os.R_OK | os.X_OK):
+                raise ValueError(f"Local raw source directory is not readable: {root}")
+            present = True
+    if not present:
+        raise ValueError(f"Local raw source directory does not exist: {raw} or {compacted}")
 
     bounds = []
     for edge, default_hour in (("START", "00"), ("END", "23")):
         name = f"WINTAP_DBT_{edge}_DAY"
         day = env.get(name, "")
         if not re.fullmatch(r"[0-9]{8}", day):
-            extra = "; S3 requires explicit partition dates" if kind == "s3" else ""
+            extra = (
+                "; S3 requires explicit partition dates" if "s3" in (kind, compacted_kind) else ""
+            )
             raise ValueError(f"{name} must be YYYYMMDD{extra}")
         try:
             date = dt.datetime.strptime(day, "%Y%m%d")

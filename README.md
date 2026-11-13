@@ -9,6 +9,22 @@ DBT is now the primary post-processing path. The canonical input is a `raw_senso
 ```text
 <dataset>/raw_sensor/<event_type>/dayPK=YYYYMMDD/hourPK=HH/*.parquet
 <dataset>/raw_sensor/raw_process_conn_incr/dayPK=YYYYMMDD/hourPK=HH/protoPK=tcp|udp/*.parquet
+<dataset>/compacted/<event_type>/dayPK=YYYYMMDD/hourPK=HH[/protoPK=...]/<merged>.parquet
+```
+
+DBT reads both raw and compacted locations with name-aligned UNION ALL semantics.
+Compaction validates then deletes source prefixes after the UTC upload grace;
+run DBT after successful migration, not during overlap or an unreconciled failure.
+`WINTAP_DBT_COMPACTED_ROOT` optionally overrides the direct compacted event root.
+See [the DBT guide](wintap_dbt/README.md#compaction-migration-contract).
+
+The [hourly compactor](extras/raw-sensor-compact/README.md) lives in
+`extras/raw-sensor-compact/` as a standalone UV project, with its own lockfile
+and DuckDB **2.0.0** environment. It does not upgrade the main pipeline's
+DuckDB **1.5.6** dependency. From this repository root:
+
+```bash
+uv run --project extras/raw-sensor-compact --locked raw-sensor-compact --help
 ```
 
 For the full current run process, start with:
@@ -69,7 +85,7 @@ DBT Makefile targets use `uv run --isolated --dev` by default so a missing or br
 Create the development environment and install the package in editable mode:
 
 The canonical Python/DBT environment pins DuckDB **1.5.6** in `pyproject.toml`.
-The DBT adapter remains on the 1.9 line; DuckDB 2.0 is not part of this update.
+The DBT adapter remains on the 1.9 line; DuckDB 2.0 is used only by the isolated compactor.
 
 ```bash
 uv sync --dev

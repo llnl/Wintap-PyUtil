@@ -84,6 +84,8 @@ wintap-run.env
 
 # uv lockfile is generated locally until dependency pinning policy is finalized.
 uv.lock
+!/extras/raw-sensor-compact/uv.lock
+/extras/raw-sensor-compact/.ruff_cache/
 
 # DBT artifacts and local databases
 dbt/logs/dbt.log
