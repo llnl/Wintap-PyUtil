@@ -184,6 +184,42 @@ def test_existing_hour_does_not_prevent_next_hour(conn, corpus, parquet):
     assert report["partitions"][0]["hourPK"] == "01"
 
 
+def test_deletion_failure_does_not_prevent_next_event_compaction(
+    conn, tmp_path, parquet, monkeypatch
+):
+    source = Dataset.parse(str(tmp_path / "raw_sensor"), event_root=True)
+    destination = Dataset.parse(str(tmp_path / "compacted"), event_root=True)
+    for event in ("first", "second"):
+        leaf = Leaf(event, "20260101", "00")
+        parquet(source.file_uri(leaf.relative + "input.parquet"), "SELECT 1 AS value")
+
+    from raw_sensor_compact.deletion import DeletionError
+
+    def fail_first(store, parent):
+        if parent.event_type == "first":
+            raise DeletionError("stale listing", details={"remaining_keys": ["first"]})
+        return 1
+
+    monkeypatch.setattr("raw_sensor_compact.compaction.delete_hour", fail_first)
+    report = process_hours(
+        conn,
+        Store(source),
+        Store(destination),
+        HOURS,
+        ("first", "second"),
+        Limits(),
+        target_size_bytes=1_000_000,
+        delete_source=True,
+        now=datetime(2026, 1, 1, 2, tzinfo=timezone.utc),
+    )
+    assert report["status"] == "completed_with_deletion_errors"
+    assert {p["event_type"] for p in report["partitions"]} == {"first", "second"}
+    assert [h["status"] for h in report["hours"]] == [
+        "merged_with_deletion_error",
+        "merged",
+    ]
+
+
 def test_cli_fixed_root_merge_verify_and_skip(corpus, capsys):
     flags = [
         "--source-root",

@@ -106,6 +106,21 @@ def test_invalid_parameters_fail_without_backend_details(tmp_path, capsys):
     assert "overlap" in json.loads(capsys.readouterr().err)["message"]
 
 
+def test_reconciliation_requires_explicit_confirmation(tmp_path, capsys):
+    assert (
+        main(
+            args(
+                "reconcile-delete",
+                tmp_path / "source",
+                tmp_path / "merged",
+                "pidstat",
+            )
+        )
+        == 2
+    )
+    assert "confirm-delete" in json.loads(capsys.readouterr().err)["message"]
+
+
 def test_backend_errors_do_not_leak_credentials(tmp_path, capsys, monkeypatch):
     def fail(*args, **kwargs):
         raise RuntimeError("signed_url=secret TOKEN=supersecret")

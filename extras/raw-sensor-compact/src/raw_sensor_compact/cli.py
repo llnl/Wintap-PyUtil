@@ -5,19 +5,27 @@ import json
 import sys
 from time import monotonic
 
-from .compaction import process_hours
+from .compaction import process_hours, reconcile_deletions
 from .config import CompactionError, Dataset, Limits, hour_window, separate_roots
 from .engine import connection, validate_counts
-from .inventory import Store, discover, recheck
-from .storage import S3Settings, open_s3
 from .entities import EntityLimits, host_name
 from .entity_store import EntityStore, update_entities
+from .inventory import Store, discover, recheck
+from .storage import S3Settings, open_s3
 
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     commands = result.add_subparsers(dest="command", required=True)
-    for name in ("plan", "compact", "verify", "entities-init", "entities-replay", "entities-verify"):
+    for name in (
+        "plan",
+        "compact",
+        "verify",
+        "reconcile-delete",
+        "entities-init",
+        "entities-replay",
+        "entities-verify",
+    ):
         command = commands.add_parser(name)
         command.add_argument(
             "--source-root",
@@ -41,6 +49,31 @@ def parser() -> argparse.ArgumentParser:
                 type=int,
                 default=10,
                 help="Minimum age after hour end for deletion (default 10; minimum 5)",
+            )
+        if name in {"compact", "reconcile-delete"}:
+            command.add_argument(
+                "--delete-confirm-attempts",
+                type=int,
+                default=5,
+                help="Post-delete empty-list confirmations (default 5)",
+            )
+            command.add_argument(
+                "--delete-confirm-initial-delay-seconds",
+                type=float,
+                default=1.0,
+                help="Initial post-delete confirmation delay (default 1 second)",
+            )
+        if name == "reconcile-delete":
+            command.add_argument(
+                "--grace-minutes",
+                type=int,
+                default=10,
+                help="Minimum age after hour end for deletion (default 10; minimum 5)",
+            )
+            command.add_argument(
+                "--confirm-delete",
+                action="store_true",
+                help="Explicitly authorize deletion after output validation",
             )
         command.add_argument("--start-hour", required=True)
         command.add_argument("--end-hour", required=True)
@@ -82,7 +115,22 @@ def run(args) -> tuple[dict, int]:
     source = Dataset.parse(args.source_root, event_root=True)
     destination = Dataset.parse(args.destination_root, event_root=True)
     separate_roots(source, destination)
+    if args.command == "reconcile-delete" and not args.confirm_delete:
+        raise CompactionError(
+            "Deletion reconciliation requires explicit --confirm-delete"
+        )
     hours = hour_window(args.start_hour, args.end_hour, max_hours=limits.max_hours)
+    if args.command == "reconcile-delete":
+        from datetime import datetime, timedelta, timezone
+
+        if not 5 <= args.grace_minutes <= 1440 or any(
+            h + timedelta(hours=1, minutes=args.grace_minutes)
+            > datetime.now(timezone.utc)
+            for h in hours
+        ):
+            raise CompactionError(
+                "Source deletion requires closed UTC hours past a 5–1440 minute grace"
+            )
     events = tuple(args.event_type)
     settings = S3Settings(
         args.profile, args.region, args.endpoint_url, args.extension_directory
@@ -151,10 +199,34 @@ def run(args) -> tuple[dict, int]:
                 delete_source=getattr(args, "delete_source", False),
                 grace_minutes=getattr(args, "grace_minutes", 10),
                 process_inventory=process_inventory,
+                delete_confirm_attempts=getattr(args, "delete_confirm_attempts", 5),
+                delete_confirm_initial_delay_seconds=getattr(
+                    args, "delete_confirm_initial_delay_seconds", 1.0
+                ),
             )
             if entity_report is not None:
                 report["process_entities"] = entity_report
-            return report, 0
+            return (
+                report,
+                2 if report["status"] == "completed_with_deletion_errors" else 0,
+            )
+        if args.command == "reconcile-delete":
+            report = reconcile_deletions(
+                conn,
+                source_store,
+                merged_store,
+                hours,
+                events,
+                limits,
+                confirm_delete=args.confirm_delete,
+                grace_minutes=args.grace_minutes,
+                delete_confirm_attempts=args.delete_confirm_attempts,
+                delete_confirm_initial_delay_seconds=args.delete_confirm_initial_delay_seconds,
+            )
+            return (
+                report,
+                2 if report["status"] == "completed_with_deletion_errors" else 0,
+            )
         inputs = discover(source_store, hours, events, max_files=limits.max_files)
         merged = discover(merged_store, hours, events, max_files=limits.max_files)
         report = {

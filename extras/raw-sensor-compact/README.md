@@ -52,8 +52,10 @@ JSON reports show each hour's `merged`, `planned`, `empty`, or `skipped_existing
 status, with source/merged files/bytes/row totals and delta for merged leaves.
 `verify` checks the union of source/output leaf keys, so deltas cannot cancel
 between protocols. Exit codes: 0 success/skip/empty, 1 verification count mismatch,
-2 invalid input/read/schema/drift/merge failure. Errors identify the failed
-destination hour when available. A skipped hour is **not** certified as a good merge.
+2 invalid input/read/schema/drift/merge failure or an unresolved deletion failure.
+Deletion failures are also included in the JSON report with confirmation attempts,
+remaining keys, and safe delete-response metadata. A skipped hour is **not**
+certified as a good merge.
 
 ## Skip and manual recovery
 
@@ -87,15 +89,39 @@ an explicitly accepted risk, not a reason for per-object deletion here.
 
 Deletion includes non-Parquet markers under the exact source hour, not adjacent
 hours. S3 keys are listed before batched deletion; per-key errors and remaining
-objects fail the command. Local deletion refuses symlinks. Saved merge reports
-include source/output totals/delta and deleted-object counts; `verify` comparing
-source to output is useful **before deletion or in retain-source mode**, not after
-source has been removed. Use a saved baseline/unioned consumer check after migration.
+objects fail the deletion phase. A successful delete is confirmed with bounded
+exact-prefix `ListObjectsV2` retries using exponential backoff (default: five
+attempts, one-second initial delay). Local deletion refuses symlinks. Saved merge
+reports include source/output totals/delta and deleted-object counts; `verify`
+comparing source to output is useful **before deletion or in retain-source mode**,
+not after source has been removed. Use a saved baseline/unioned consumer check after
+migration.
+
+Compaction uses two phases per hour: all selected event families are merged and
+validated first, then source-prefix deletion is attempted. A stale post-delete
+listing for one family therefore does not prevent other families from completing;
+the command reports `completed_with_deletion_errors` and exits 2 while retaining
+partial/recoverable state.
+
+When a prior run leaves validated outputs and source prefixes, use the explicit
+reconciliation command rather than rerunning `compact` (existing destination hours
+are skipped):
+
+```bash
+raw-sensor-compact reconcile-delete \
+  --source-root s3://bucket/dataset/raw_sensor \
+  --destination-root s3://bucket/dataset/compacted \
+  --start-hour 2026-11-11T08:00:00Z --end-hour 2026-11-11T09:00:00Z \
+  --event-type pidstat --confirm-delete
+```
+
+Reconciliation rechecks source/output inventories and per-leaf row counts, applies
+the same grace and bounded-confirmation rules, and requires `--confirm-delete`.
+Validation failures block deletion for that exact event/hour and are reported.
 
 Run DBT only after a successful migration. Temporary overlap and partial deletion
-on failures are accepted. The tool stops on failure and reports the source hour,
-destination hour and phase; reconcile manually before DBT. Rerun still skips an
-existing destination rather than completing a failed source deletion automatically.
+on failures are accepted. Reconcile deletion failures before DBT. Rerun still skips
+an existing destination rather than completing a failed source deletion automatically.
 Live deletion testing is approved on isolated copies only; original live objects
 have not been authorized for a rollout deletion.
 

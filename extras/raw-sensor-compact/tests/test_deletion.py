@@ -6,7 +6,7 @@ import pytest
 
 from raw_sensor_compact.compaction import process_hours
 from raw_sensor_compact.config import CompactionError, Dataset, Leaf, Limits
-from raw_sensor_compact.deletion import delete_hour
+from raw_sensor_compact.deletion import DeletionError, delete_hour
 from raw_sensor_compact.inventory import Store
 
 HOUR = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -78,18 +78,21 @@ def test_merge_failures_never_delete(conn, corpus, monkeypatch, failure):
     assert before == {p: p.read_bytes() for p in before}
 
 
-def test_partial_deletion_stops_and_rerun_does_not_delete(conn, corpus, monkeypatch):
+def test_partial_deletion_is_reported_and_rerun_does_not_delete(
+    conn, corpus, monkeypatch
+):
     source, dest, _ = corpus
 
     def fail(store, parent):
         next(Path(store.dataset.file_uri(parent.relative)).rglob("*.parquet")).unlink()
-        raise CompactionError("injected partial deletion")
+        raise DeletionError(
+            "injected partial deletion", details={"remaining_keys": ["one"]}
+        )
 
     monkeypatch.setattr("raw_sensor_compact.compaction.delete_hour", fail)
-    with pytest.raises(CompactionError, match="partial deletion") as error:
-        run(conn, source, dest)
-    assert error.value.phase == "delete_source"
-    assert error.value.source_hour == source.file_uri(PARENT.relative)
+    result = run(conn, source, dest)
+    assert result["status"] == "completed_with_deletion_errors"
+    assert result["deletion_failures"][0]["remaining_keys"] == ["one"]
     assert len(list(Path(source.root).rglob("*.parquet"))) == 3
     assert run(conn, source, dest)["status"] == "skipped"
 
@@ -167,6 +170,91 @@ def test_s3_paginated_prefix_delete_batches_and_markers():
         for v in call.kwargs["Delete"]["Objects"]
     }
     assert deleted == set(keys)
+
+
+def test_s3_post_delete_retry_can_confirm_eventual_empty_listing():
+    store, prefix = s3_store()
+    key = prefix + "one.parquet"
+    store.client.get_paginator.return_value.paginate.return_value = [
+        {"Contents": [{"Key": key}]}
+    ]
+    store.client.delete_objects.return_value = {
+        "ResponseMetadata": {"HTTPStatusCode": 200, "RequestId": "request-1"}
+    }
+    store.client.list_objects_v2.side_effect = [
+        {"Contents": [{"Key": key}]},
+        {},
+    ]
+    delays = []
+
+    assert (
+        delete_hour(
+            store,
+            PARENT,
+            confirm_attempts=3,
+            confirm_initial_delay_seconds=0.25,
+            sleep_fn=delays.append,
+        )
+        == 1
+    )
+    assert delays == [0.25]
+    assert store.client.list_objects_v2.call_count == 2
+
+
+def test_s3_post_delete_retry_exhaustion_exposes_diagnostics():
+    store, prefix = s3_store()
+    key = prefix + "one.parquet"
+    store.client.get_paginator.return_value.paginate.return_value = [
+        {"Contents": [{"Key": key}]}
+    ]
+    store.client.delete_objects.return_value = {
+        "ResponseMetadata": {
+            "HTTPStatusCode": 200,
+            "RequestId": "request-2",
+            "HostId": "host-2",
+        }
+    }
+    store.client.list_objects_v2.return_value = {"Contents": [{"Key": key}]}
+    with pytest.raises(DeletionError) as error:
+        delete_hour(
+            store,
+            PARENT,
+            confirm_attempts=3,
+            confirm_initial_delay_seconds=0,
+            sleep_fn=lambda delay: None,
+        )
+    assert error.value.details["confirmation_attempts"] == 3
+    assert error.value.details["remaining_keys"] == [key]
+    assert error.value.details["delete_responses"] == [
+        {"HTTPStatusCode": 200, "RequestId": "request-2", "HostId": "host-2"}
+    ]
+
+
+def test_reconciliation_validates_output_before_deleting(conn, corpus):
+    source, dest, _ = corpus
+    process_hours(
+        conn,
+        Store(source),
+        Store(dest),
+        (HOUR,),
+        ("network",),
+        Limits(),
+        target_size_bytes=1_000_000,
+    )
+    from raw_sensor_compact.compaction import reconcile_deletions
+
+    report = reconcile_deletions(
+        conn,
+        Store(source),
+        Store(dest),
+        (HOUR,),
+        ("network",),
+        Limits(),
+        confirm_delete=True,
+    )
+    assert report["status"] == "completed"
+    assert report["hours"][0]["status"] == "deleted"
+    assert not Store(source).exists(PARENT.relative)
 
 
 @pytest.mark.parametrize(
