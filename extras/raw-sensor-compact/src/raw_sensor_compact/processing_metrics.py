@@ -8,9 +8,10 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 
 from .config import CompactionError
+from .entities import DEFAULT_IDENTITY_MAX_RATIO
 from .inventory import Inventory, Store
 
-VERSION = "2"
+VERSION = "3"
 SCHEMA = {
     "metric_version": "VARCHAR",
     "run_id": "VARCHAR",
@@ -30,7 +31,10 @@ SCHEMA = {
     "entity_snapshot_hashes": "VARCHAR",
     "entity_input_fingerprint": "VARCHAR",
     "identity_policy": "VARCHAR",
+    "identity_exclusion_input_rows": "BIGINT",
     "identity_exclusion_rows": "BIGINT",
+    "identity_exclusion_ratio": "DOUBLE",
+    "identity_exclusion_max_ratio": "DOUBLE",
     "identity_exclusion_fingerprint": "VARCHAR",
     "identity_exclusion_reasons": "VARCHAR",
     "identity_exclusion_hosts": "VARCHAR",
@@ -200,10 +204,21 @@ def metric_rows(
                 "entity_snapshot_hashes": json.dumps(entity_hashes, sort_keys=True),
                 "entity_input_fingerprint": input_fingerprint,
                 "identity_policy": identity_policy,
-                "identity_exclusion_rows": int(identity_hour.get("rows", 0) or 0),
-                "identity_exclusion_fingerprint": identity_hour.get(
-                    "fingerprint", ""
+                "identity_exclusion_input_rows": int(
+                    identity_hour.get("input_rows", 0) or 0
                 ),
+                "identity_exclusion_rows": int(identity_hour.get("rows", 0) or 0),
+                "identity_exclusion_ratio": float(
+                    identity_hour.get("ratio", 0.0) or 0.0
+                ),
+                "identity_exclusion_max_ratio": float(
+                    identity_hour.get(
+                        "max_ratio",
+                        identity_report.get("max_ratio", DEFAULT_IDENTITY_MAX_RATIO),
+                    )
+                    or 0.0
+                ),
+                "identity_exclusion_fingerprint": identity_hour.get("fingerprint", ""),
                 "identity_exclusion_reasons": json.dumps(
                     identity_hour.get("reasons", {}), sort_keys=True
                 ),

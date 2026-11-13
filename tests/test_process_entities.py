@@ -114,6 +114,14 @@ def test_missing_processing_metrics_fails_preflight(env, tmp_path):
     assert "Processing metrics" in result.stdout + result.stderr
 
 
+def test_identity_threshold_mismatch_fails_preflight(env, tmp_path):
+    setup(env, tmp_path)
+    env["WINTAP_DBT_PROCESS_UNKNOWN_IDENTITY_MAX_RATIO"] = "0.10"
+    result = operation(env, tmp_path)
+    assert result.returncode != 0
+    assert "Processing metrics" in result.stdout + result.stderr
+
+
 def test_parent_conflict_terminates_instead_of_arbitrary_repair(env, tmp_path):
     setup(env, tmp_path)
     conflict = tmp_path / "input/raw_sensor/raw_process/dayPK=20260102/hourPK=00/conflict.parquet"
@@ -152,6 +160,8 @@ def test_missing_ancestor_and_nonroot_cycle_are_not_complete(env, tmp_path, mode
     ("WINTAP_DBT_PROCESS_ENTITY_NAMESPACE", ""),
     ("WINTAP_DBT_PROCESS_ENTITY_HOSTS", ""),
     ("WINTAP_DBT_PROCESS_UNKNOWN_IDENTITY_POLICY", "invent"),
+    ("WINTAP_DBT_PROCESS_UNKNOWN_IDENTITY_MAX_RATIO", "1.1"),
+    ("WINTAP_DBT_PROCESS_UNKNOWN_IDENTITY_MAX_RATIO", "not-a-number"),
 ])
 def test_entity_config_guards(env, tmp_path, name, value):
     setup(env, tmp_path)

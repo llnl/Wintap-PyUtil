@@ -151,7 +151,13 @@ def test_unknown_identity_fails_closed(conn, stores, changes):
 
 def test_unknown_identity_quarantine_is_explicit_and_not_published(conn, stores, tmp_path):
     source, compacted, entities = stores
-    seed(conn, source)
+    for index in range(20):
+        seed(
+            conn,
+            source,
+            observation(pidhash=f"child-{index}", pid=10 + index),
+            filename=f"valid-{index}.parquet",
+        )
     excluded = seed(
         conn, source, observation(pidhash="unknown"), filename="excluded.parquet"
     )
@@ -168,10 +174,33 @@ def test_unknown_identity_quarantine_is_explicit_and_not_published(conn, stores,
     exclusions = report["identity_exclusions"]
     assert exclusions["policy"] == "quarantine"
     assert exclusions["rows"] == 1
+    assert exclusions["input_rows"] == 21
+    assert exclusions["ratio"] == pytest.approx(1 / 21)
+    assert exclusions["max_ratio"] == pytest.approx(0.05)
     assert exclusions["reasons"] == {"unknown_pid_hash": 1}
+    assert exclusions["hours"]["2026010100"]["input_rows"] == 21
+    assert exclusions["hours"]["2026010100"]["ratio"] == pytest.approx(1 / 21)
     assert exclusions["fingerprint"]
     assert excluded.exists()
-    assert set(state(conn, entities, tmp_path)) == {"child"}
+    assert set(state(conn, entities, tmp_path)) == {f"child-{index}" for index in range(20)}
+
+
+def test_unknown_identity_quarantine_threshold_fails_closed(conn, stores):
+    source, compacted, entities = stores
+    seed(conn, source)
+    seed(conn, source, observation(pidhash="unknown"), filename="excluded.parquet")
+    with pytest.raises(CompactionError, match="exceeds quarantine threshold"):
+        update_entities(
+            conn,
+            source,
+            compacted,
+            entities,
+            HOURS,
+            ["HOST"],
+            initialize=True,
+            identity_policy="quarantine",
+        )
+    assert not list(Path(entities.store.dataset.root).glob("**/*.parquet"))
 
 
 def test_plan_read_only_and_resource_failure(conn, stores):

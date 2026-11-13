@@ -240,12 +240,16 @@ rather than allowing raw-only processing to masquerade as durable-state maintena
 Unknown process identities are rejected by default. With the explicit
 `--unknown-identity-policy quarantine` option, raw rows with an unknown hash,
 missing/negative PID or invalid hostname remain in raw telemetry but are excluded
-from durable snapshots. The per-hour checkpoint records the policy, exclusion
-count, reason/host breakdowns and stable fingerprints; it is an operator QA
-signal, not an assertion that those rows identify entities. No PID-only repair or
-fabricated ancestor is performed. DBT must opt into the matching
+from durable snapshots. Quarantine also requires the excluded rows to remain at
+or below the per-hour `--unknown-identity-max-ratio` ceiling, which defaults to
+`0.05` (5%) and is configurable. The per-hour checkpoint records the policy,
+input denominator, exclusion numerator, observed ratio, configured ceiling,
+reason/host breakdowns and stable fingerprints; it is an operator QA signal, not
+an assertion that those rows identify entities. No PID-only repair or fabricated
+ancestor is performed. DBT must opt into the matching
 `WINTAP_DBT_PROCESS_UNKNOWN_IDENTITY_POLICY=quarantine` setting to consume such
-checkpoints. The default `reject` policy remains fail-closed.
+checkpoints and `WINTAP_DBT_PROCESS_UNKNOWN_IDENTITY_MAX_RATIO` must match the
+writer ceiling. The default `reject` policy remains fail-closed.
 
 ### Bootstrap and hourly operation
 

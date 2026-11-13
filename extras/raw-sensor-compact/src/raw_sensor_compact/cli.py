@@ -10,7 +10,7 @@ from time import monotonic
 from .compaction import process_hours, reconcile_deletions
 from .config import CompactionError, Dataset, Limits, hour_window, separate_roots
 from .engine import connection, validate_counts
-from .entities import EntityLimits, host_name
+from .entities import DEFAULT_IDENTITY_MAX_RATIO, EntityLimits, host_name
 from .entity_store import EntityStore, entity_inventory, update_entities
 from .inventory import Store, discover, recheck
 from .processing_metrics import ProcessingMetricsStore, metric_rows
@@ -106,6 +106,15 @@ def parser() -> argparse.ArgumentParser:
             help=(
                 "How entity mode handles unknown process identities; reject is "
                 "the safe default, quarantine retains explicit non-entity evidence"
+            ),
+        )
+        command.add_argument(
+            "--unknown-identity-max-ratio",
+            type=float,
+            default=DEFAULT_IDENTITY_MAX_RATIO,
+            help=(
+                "Maximum per-hour fraction of process rows that may be "
+                "quarantined (default 0.05)"
             ),
         )
         command.add_argument("--max-entity-rows", type=int, default=1_000_000)
@@ -282,6 +291,7 @@ def run(args) -> tuple[dict, int]:
                     max_files=limits.max_files,
                     resume_init=getattr(args, "resume_init", False),
                     identity_policy=args.unknown_identity_policy,
+                    identity_max_ratio=args.unknown_identity_max_ratio,
                 )
                 if args.command.startswith("entities-"):
                     if args.command in {"entities-init", "entities-replay"}:

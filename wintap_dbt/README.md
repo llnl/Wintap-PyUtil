@@ -14,6 +14,7 @@ export WINTAP_DBT_PROCESS_ENTITY_ROOT=s3://bucket/dataset/process_entities
 export WINTAP_DBT_PROCESS_ENTITY_HOSTS=HOST-A,HOST-B
 export WINTAP_DBT_PROCESS_ENTITY_NAMESPACE=pid-v2-dataset-one
 export WINTAP_DBT_PROCESS_UNKNOWN_IDENTITY_POLICY=reject
+export WINTAP_DBT_PROCESS_UNKNOWN_IDENTITY_MAX_RATIO=0.05
 export WINTAP_DBT_PROCESSING_METRICS_ROOT=s3://bucket/dataset/processing_metrics
 ```
 
@@ -30,7 +31,10 @@ fail preflight. No automatic empty-state fallback. The metrics root defaults to 
 the writer policy recorded in every checkpoint. `quarantine` is an explicit
 exception: unknown-identity raw evidence remains available to bronze/raw QA but
 is not loaded into durable entity state. Checkpoint exclusion counts, reasons,
-hosts and fingerprints are retained for review; quarantine does not repair keys
+hosts and fingerprints are retained for review. Quarantine is bounded by the
+writer's per-hour `WINTAP_DBT_PROCESS_UNKNOWN_IDENTITY_MAX_RATIO` ceiling,
+which defaults to 0.05; DBT requires the configured ceiling, numerator,
+denominator and ratio to match each checkpoint. Quarantine does not repair keys
 or create ancestors.
 
 `stg_process_entities` materializes the validated state and bootstrap provenance.

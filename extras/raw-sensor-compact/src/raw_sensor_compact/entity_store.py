@@ -10,6 +10,7 @@ from botocore.exceptions import ClientError
 
 from .config import CompactionError, separate_roots
 from .entities import (
+    DEFAULT_IDENTITY_MAX_RATIO,
     SCHEMA,
     VERSION,
     EntityLimits,
@@ -255,6 +256,7 @@ def update_entities(
     max_files=10000,
     resume_init=False,
     identity_policy="reject",
+    identity_max_ratio=DEFAULT_IDENTITY_MAX_RATIO,
 ):
     """Prepare all hosts, recheck every input, publish/verify; no source deletion."""
     from .entities import load_inputs
@@ -277,7 +279,10 @@ def update_entities(
             "Entity archive file limit exceeded; inputs not truncated"
         )
     identity_exclusions = load_inputs(
-        conn, inventories, identity_policy=identity_policy
+        conn,
+        inventories,
+        identity_policy=identity_policy,
+        identity_max_ratio=identity_max_ratio,
     )
     observed = {
         r[0]

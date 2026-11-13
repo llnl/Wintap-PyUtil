@@ -2,6 +2,7 @@
 
 import argparse
 import datetime as dt
+import math
 import os
 import re
 import sys
@@ -76,6 +77,19 @@ def validate(env, output_only=False):
     if identity_policy not in {"reject", "quarantine"}:
         raise ValueError(
             "WINTAP_DBT_PROCESS_UNKNOWN_IDENTITY_POLICY must be reject or quarantine"
+        )
+    identity_max_ratio_text = env.get(
+        "WINTAP_DBT_PROCESS_UNKNOWN_IDENTITY_MAX_RATIO", "0.05"
+    ).strip()
+    try:
+        identity_max_ratio = float(identity_max_ratio_text)
+    except ValueError as exc:
+        raise ValueError(
+            "WINTAP_DBT_PROCESS_UNKNOWN_IDENTITY_MAX_RATIO must be a number from 0 to 1"
+        ) from exc
+    if not math.isfinite(identity_max_ratio) or not 0 <= identity_max_ratio <= 1:
+        raise ValueError(
+            "WINTAP_DBT_PROCESS_UNKNOWN_IDENTITY_MAX_RATIO must be a number from 0 to 1"
         )
     if entity:
         entity_kind = source_type(entity)
