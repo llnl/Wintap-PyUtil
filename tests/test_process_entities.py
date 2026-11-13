@@ -105,6 +105,15 @@ def test_missing_or_wrong_namespace_state_fails_preflight(env, tmp_path):
     assert operation(env, tmp_path).returncode != 0
 
 
+def test_missing_processing_metrics_fails_preflight(env, tmp_path):
+    setup(env, tmp_path)
+    for metric in (tmp_path / "input/processing_metrics").glob("**/*.parquet"):
+        metric.unlink()
+    result = operation(env, tmp_path)
+    assert result.returncode != 0
+    assert "Processing metrics" in result.stdout + result.stderr
+
+
 def test_parent_conflict_terminates_instead_of_arbitrary_repair(env, tmp_path):
     setup(env, tmp_path)
     conflict = tmp_path / "input/raw_sensor/raw_process/dayPK=20260102/hourPK=00/conflict.parquet"

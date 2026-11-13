@@ -85,6 +85,20 @@ def validate(env, output_only=False):
         required(env, "WINTAP_DBT_PROCESS_ENTITY_NAMESPACE")
         if entity_kind == "local" and not Path(entity).is_dir():
             raise ValueError("Process entity root does not exist")
+        metrics = (
+            env.get("WINTAP_DBT_PROCESSING_METRICS_ROOT", "").rstrip("/")
+            or source.rstrip("/") + "/processing_metrics"
+        )
+        metrics_kind = source_type(metrics)
+        metrics_path = str(Path(metrics).resolve()) if metrics_kind == "local" else metrics
+        for other in [*roots, entity_path]:
+            a, b = metrics_path.rstrip("/") + "/", other.rstrip("/") + "/"
+            if a.startswith(b) or b.startswith(a):
+                raise ValueError(
+                    "Processing metrics root must not overlap raw/compacted/entity inputs"
+                )
+        if metrics_kind == "local" and not Path(metrics).is_dir():
+            raise ValueError("Processing metrics root does not exist")
     present = False
     for root, root_kind in ((raw, kind), (compacted, compacted_kind)):
         if root_kind == "s3":

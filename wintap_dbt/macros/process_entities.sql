@@ -55,6 +55,57 @@
     {{ return(files | unique | list) }}
 {%- endmacro %}
 
+{% macro processing_metrics_root() -%}
+    {{ return(env_var('WINTAP_DBT_PROCESSING_METRICS_ROOT', raw_sensor_dataset_path() ~ '/processing_metrics').rstrip('/')) }}
+{%- endmacro %}
+
+{% macro processing_metrics_glob() -%}
+    {{ return(processing_metrics_root() ~ '/**/*.parquet') }}
+{%- endmacro %}
+
+{% macro validate_processing_metrics(bootstrap_starts) -%}
+    {% if not execute or not env_var('WINTAP_DBT_PROCESS_ENTITY_ROOT', '') %}{{ return('') }}{% endif %}
+    {% if not raw_event_exists('raw_process') %}
+        {{ exceptions.raise_compiler_error('Durable entity coverage requires raw_process input in the DBT window') }}
+    {% endif %}
+    {% set metric_glob = processing_metrics_glob() | replace("'", "''") %}
+    {% set files = run_query("select count(*) from glob('" ~ metric_glob ~ "')").columns[0].values()[0] %}
+    {% if files == 0 %}
+        {{ exceptions.raise_compiler_error('Processing metrics are missing; durable entity coverage is stale or has not been initialized') }}
+    {% endif %}
+    {% set required_sql %}
+        with required as (
+            select distinct
+                try_strptime(cast(dayPK as varchar) || lpad(cast(hourPK as varchar), 2, '0'), '%Y%m%d%H') as hour_start
+            from {{ parquet_relation('raw_process') }}
+            where {{ partition_filter() }}
+        ), metrics as (
+            select
+                try_strptime(hour_start, '%Y-%m-%dT%H:00:00Z') as hour_start,
+                status, metric_version, entity_mode, entity_namespace
+            from read_parquet('{{ metric_glob }}', hive_partitioning=false, union_by_name=true)
+        ), joined as (
+            select r.hour_start,
+                   count(m.hour_start) as metric_rows,
+                   count(m.hour_start) filter(where m.status not in ('completed', 'completed_with_deletion_errors')) as bad_rows,
+                   count(m.hour_start) filter(where m.metric_version != '1' or not m.entity_mode or m.entity_namespace != '{{ env_var('WINTAP_DBT_PROCESS_ENTITY_NAMESPACE') | replace("'", "''") }}') as invalid_rows
+            from required r left join metrics m using(hour_start)
+            group by r.hour_start
+        )
+        select
+            count(*) as required_hours,
+            count(*) filter(where metric_rows = 0) as missing_hours,
+            count(*) filter(where metric_rows > 1) as duplicate_hours,
+            coalesce(sum(bad_rows), 0) as bad_rows,
+            coalesce(sum(invalid_rows), 0) as invalid_rows
+        from joined
+    {% endset %}
+    {% set result = run_query(required_sql).rows[0] %}
+    {% if result[1] != 0 or result[2] != 0 or result[3] != 0 or result[4] != 0 %}
+        {{ exceptions.raise_compiler_error('Processing metrics do not prove complete durable coverage for every raw_process hour in the DBT window') }}
+    {% endif %}
+{%- endmacro %}
+
 {% macro validate_process_entities() -%}
     {% if not execute or not env_var('WINTAP_DBT_PROCESS_ENTITY_ROOT', '') %}{{ return('') }}{% endif %}
     {% set files = process_entity_files() %}
@@ -69,6 +120,7 @@
         'seen_start': 'BOOLEAN', 'seen_refresh': 'BOOLEAN', 'seen_stop': 'BOOLEAN',
         'evidence_json': 'VARCHAR', 'first_partition': 'VARCHAR', 'last_partition': 'VARCHAR'
     } %}
+    {% set bootstrap_starts = [] %}
     {% for file in files %}
         {% set quoted = "'" ~ file | replace("'", "''") ~ "'" %}
         {% set actual = run_query('describe select * from read_parquet(' ~ quoted ~ ', hive_partitioning=false)') %}
@@ -83,6 +135,7 @@
         {% if metadata | length != 5 or metadata.get('entity_version') != '1' or metadata.get('identity_namespace') != namespace or metadata.get('hostname') not in hosts | map('trim') | map('upper') | list or metadata.get('bootstrap_start', '') == '' or metadata.get('time_basis') != 'producer_filetime;publication_partition' %}
             {{ exceptions.raise_compiler_error('Entity metadata/namespace/host mismatch') }}
         {% endif %}
+        {% do bootstrap_starts.append(metadata['bootstrap_start']) %}
         {% set hash = run_query("select sha256('" ~ metadata['hostname'] | replace("'", "''") ~ "')").columns[0].values()[0] %}
         {% if '/hostPK=' ~ hash ~ '/entities.parquet' not in file %}{{ exceptions.raise_compiler_error('Entity host path mismatch') }}{% endif %}
         {% set check %}
@@ -125,5 +178,6 @@
         {% endset %}
         {% if run_query(check).columns[0].values()[0] != 0 %}{{ exceptions.raise_compiler_error('Entity parent scalars disagree with evidence') }}{% endif %}
     {% endfor %}
+    {% do validate_processing_metrics(bootstrap_starts) %}
     {{ return('') }}
 {%- endmacro %}

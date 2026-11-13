@@ -3,14 +3,17 @@
 import argparse
 import json
 import sys
+import uuid
+from datetime import datetime, timedelta, timezone
 from time import monotonic
 
 from .compaction import process_hours, reconcile_deletions
 from .config import CompactionError, Dataset, Limits, hour_window, separate_roots
 from .engine import connection, validate_counts
 from .entities import EntityLimits, host_name
-from .entity_store import EntityStore, update_entities
+from .entity_store import EntityStore, entity_inventory, update_entities
 from .inventory import Store, discover, recheck
+from .processing_metrics import ProcessingMetricsStore, metric_rows
 from .storage import S3Settings, open_s3
 
 
@@ -90,14 +93,23 @@ def parser() -> argparse.ArgumentParser:
         command.add_argument("--max-files", type=int, default=10_000)
         command.add_argument("--max-hours", type=int, default=24)
         command.add_argument("--process-entity-root")
+        command.add_argument(
+            "--processing-metrics-root",
+            help="Sibling Parquet root for hourly processing metrics/checkpoints",
+        )
         command.add_argument("--entity-host", action="append", default=[])
         command.add_argument("--entity-namespace")
         command.add_argument("--max-entity-rows", type=int, default=1_000_000)
         command.add_argument("--max-entity-bytes", type=int, default=256 * 1024 * 1024)
         if name == "entities-init":
             command.add_argument("--allow-empty-host", action="store_true")
-            command.add_argument("--resume-init", action="store_true",
-                                 help="Explicitly resume partial initialization; validate existing hosts")
+            command.add_argument(
+                "--resume-init",
+                action="store_true",
+                help=(
+                    "Explicitly resume partial initialization; validate existing hosts"
+                ),
+            )
     return result
 
 
@@ -121,8 +133,6 @@ def run(args) -> tuple[dict, int]:
         )
     hours = hour_window(args.start_hour, args.end_hour, max_hours=limits.max_hours)
     if args.command == "reconcile-delete":
-        from datetime import datetime, timedelta, timezone
-
         if not 5 <= args.grace_minutes <= 1440 or any(
             h + timedelta(hours=1, minutes=args.grace_minutes)
             > datetime.now(timezone.utc)
@@ -135,29 +145,91 @@ def run(args) -> tuple[dict, int]:
     settings = S3Settings(
         args.profile, args.region, args.endpoint_url, args.extension_directory
     )
-    entity_root = Dataset.parse(args.process_entity_root) if args.process_entity_root else None
+    entity_root = (
+        Dataset.parse(args.process_entity_root) if args.process_entity_root else None
+    )
     if args.command.startswith("entities-") and entity_root is None:
         raise CompactionError("Entity commands require --process-entity-root")
+    if args.processing_metrics_root and entity_root is None:
+        raise CompactionError(
+            "Processing metrics require --process-entity-root; do not run raw-only mode"
+        )
     if args.command == "compact" and args.target_size_bytes <= 0:
         raise CompactionError("A positive explicit target-size byte count is required")
     if entity_root:
         separate_roots(source, entity_root)
         separate_roots(destination, entity_root)
         if not args.entity_namespace or not args.entity_host:
-            raise CompactionError("Entity mode requires --entity-namespace and --entity-host")
+            raise CompactionError(
+                "Entity mode requires --entity-namespace and --entity-host"
+            )
+    metrics_root = None
+    if entity_root:
+        metrics_root = Dataset.parse(
+            args.processing_metrics_root
+            if args.processing_metrics_root
+            else source.sibling("processing_metrics").root
+        )
+        separate_roots(source, metrics_root)
+        separate_roots(destination, metrics_root)
+        separate_roots(entity_root, metrics_root)
     with connection(limits) as conn:
         client = (
-            open_s3(conn, settings) if source.bucket or destination.bucket or (entity_root and entity_root.bucket) else None
+            open_s3(conn, settings)
+            if source.bucket
+            or destination.bucket
+            or (entity_root and entity_root.bucket)
+            or (metrics_root and metrics_root.bucket)
+            else None
         )
         source_store = Store(source, client, deadline=started + limits.timeout)
         merged_store = Store(destination, client, deadline=started + limits.timeout)
         entity_report, process_inventory = None, None
+        metrics = (
+            ProcessingMetricsStore(
+                Store(metrics_root, client, deadline=started + limits.timeout)
+            )
+            if metrics_root
+            else None
+        )
+        run_id = uuid.uuid4().hex
+
+        def publish_metrics(report, operation):
+            if metrics is None or process_inventory is None or args.command == "plan":
+                return
+            compacted_inventory = entity_inventory(
+                merged_store, hours, limits.max_files
+            )
+            rows = metric_rows(
+                report,
+                entity_report or {},
+                process_inventory,
+                compacted_inventory,
+                hours,
+                namespace=args.entity_namespace,
+                hosts=tuple(args.entity_host),
+                run_id=run_id,
+                operation=operation,
+                completed_at=datetime.now(timezone.utc).isoformat(),
+            )
+            for hour, row in zip(hours, rows, strict=False):
+                metrics.publish(conn, hour, row)
+            report["processing_metrics"] = {
+                "root": metrics_root.root,
+                "hours": len(rows),
+                "run_id": run_id,
+            }
+
         if entity_root:
-            entities = EntityStore(Store(entity_root, client, deadline=started + limits.timeout),
-                                   args.entity_namespace, EntityLimits(args.max_entity_rows, args.max_entity_bytes))
+            entities = EntityStore(
+                Store(entity_root, client, deadline=started + limits.timeout),
+                args.entity_namespace,
+                EntityLimits(args.max_entity_rows, args.max_entity_bytes),
+            )
             if args.command in {"entities-verify", "verify"}:
                 from pathlib import Path
                 from tempfile import TemporaryDirectory
+
                 report = {"status": "passed", "hosts": []}
                 with TemporaryDirectory(prefix="entity-verify-") as directory:
                     for host in args.entity_host:
@@ -165,26 +237,45 @@ def run(args) -> tuple[dict, int]:
                         if entities.read(host, path) is None:
                             raise CompactionError("Expected entity snapshot missing")
                         state, metadata = entities.validate(conn, path, host)
-                        report["hosts"].append({"hostname": host_name(host), "rows": len(state), "metadata": metadata})
+                        report["hosts"].append(
+                            {
+                                "hostname": host_name(host),
+                                "rows": len(state),
+                                "metadata": metadata,
+                            }
+                        )
                 if args.command == "entities-verify":
                     return report, 0
                 entity_report = report
             if args.command != "verify":
                 # Check raw deletion preflight before any entity publication.
                 if getattr(args, "delete_source", False):
-                    from datetime import datetime, timedelta, timezone
                     grace = args.grace_minutes
                     if not 5 <= grace <= 1440 or any(
-                        h + timedelta(hours=1, minutes=grace) > datetime.now(timezone.utc) for h in hours
+                        h + timedelta(hours=1, minutes=grace)
+                        > datetime.now(timezone.utc)
+                        for h in hours
                     ):
-                        raise CompactionError("Source deletion requires closed UTC hours past a 5–1440 minute grace")
+                        raise CompactionError(
+                            "Source deletion requires closed UTC hours past a "
+                            "5–1440 minute grace"
+                        )
                 entity_report, process_inventory = update_entities(
-                    conn, source_store, merged_store, entities, hours, args.entity_host,
-                    initialize=args.command == "entities-init", plan=args.command == "plan",
-                    allow_empty=getattr(args, "allow_empty_host", False), max_files=limits.max_files,
+                    conn,
+                    source_store,
+                    merged_store,
+                    entities,
+                    hours,
+                    args.entity_host,
+                    initialize=args.command == "entities-init",
+                    plan=args.command == "plan",
+                    allow_empty=getattr(args, "allow_empty_host", False),
+                    max_files=limits.max_files,
                     resume_init=getattr(args, "resume_init", False),
                 )
                 if args.command.startswith("entities-"):
+                    if args.command in {"entities-init", "entities-replay"}:
+                        publish_metrics({"hours": [], "partitions": []}, args.command)
                     return entity_report, 0
         if args.command in {"plan", "compact"}:
             report = process_hours(
@@ -206,6 +297,7 @@ def run(args) -> tuple[dict, int]:
             )
             if entity_report is not None:
                 report["process_entities"] = entity_report
+                publish_metrics(report, "compact")
             return (
                 report,
                 2 if report["status"] == "completed_with_deletion_errors" else 0,

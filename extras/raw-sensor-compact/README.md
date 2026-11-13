@@ -218,12 +218,24 @@ changed host is rewritten, which also compacts entity evidence:
 
 ```text
 <dataset>/process_entities/hostPK=<sha256 of trimmed uppercase hostname>/entities.parquet
+<dataset>/processing_metrics/dayPK=YYYYMMDD/hourPK=HH/metrics.parquet
 ```
 
 **Operational requirement:** one writer per dataset; exclude DBT readers for the
 entire update/build. There is no conditional PUT or multi-host transaction. No
 TTL or GC is applied: exited ancestors remain available. Failed publication may
 leave some hosts advanced; replay is safe and no raw deletion starts on failure.
+
+The sibling `processing_metrics/` root is maintained automatically whenever an
+entity-enabled `compact`, `entities-init`, or `entities-replay` command succeeds.
+It contains one verified Parquet checkpoint per requested UTC hour. The checkpoint
+records entity namespace/host counts, snapshot identities, process input/output
+fingerprints, row/file/byte totals, deletion status and operation status. DBT uses
+these records to reject an entity snapshot that has not processed the `raw_process`
+hours in its requested window. The metrics root can be overridden with
+`--processing-metrics-root`, but it must remain separate from raw, compacted and
+entity roots. A metrics-configured invocation without an entity root is rejected
+rather than allowing raw-only processing to masquerade as durable-state maintenance.
 
 ### Bootstrap and hourly operation
 
@@ -263,6 +275,10 @@ Existing raw destinations still skip and **never** authorize source deletion.
 Entity replay independently revisits skipped/compacted hours but does not reconcile
 raw overlap for DBT facts. Explicit catch-up windows are required after missed jobs;
 first/last partition metadata is not an ingestion cursor or gap-free coverage proof.
+Do not continue with raw-only compaction after an entity update failure. Retain the
+source hour, alert, and retry or perform an explicit rebuild/replay; otherwise the
+processing metrics table will correctly leave a coverage hole and DBT will fail
+closed.
 
 ### Evidence and resource contract
 

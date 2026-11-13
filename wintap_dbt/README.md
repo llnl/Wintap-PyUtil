@@ -13,14 +13,17 @@ snapshots independently of the analysis window:
 export WINTAP_DBT_PROCESS_ENTITY_ROOT=s3://bucket/dataset/process_entities
 export WINTAP_DBT_PROCESS_ENTITY_HOSTS=HOST-A,HOST-B
 export WINTAP_DBT_PROCESS_ENTITY_NAMESPACE=pid-v2-dataset-one
+export WINTAP_DBT_PROCESSING_METRICS_ROOT=s3://bucket/dataset/processing_metrics
 ```
 
 All three settings are required together. Initialize historical state first with
 the [standalone entity manager](../extras/raw-sensor-compact/README.md#durable-process-entities-round-one).
 Use one writer per dataset and **pause it for the entire DBT build**, not just
 preflight. Fixed files have no multi-host snapshot transaction. Missing expected
-files, incompatible schema/host/namespace, invalid JSON evidence or contradictory
-stored parent scalars fail preflight. No automatic empty-state fallback.
+files, incompatible schema/host/namespace, invalid JSON evidence, contradictory
+stored parent scalars, missing processing metrics, or uncovered `raw_process` hours
+fail preflight. No automatic empty-state fallback. The metrics root defaults to the
+`processing_metrics` sibling of `WINTAP_DBT_RAW_SENSOR_DATASET`.
 
 `stg_process_entities` materializes the validated state and bootstrap provenance.
 `process_entities` resolves paired parents from retained plus current-window
@@ -49,8 +52,10 @@ downstream ANY_VALUE/grouping behavior or arbitrary historical as-of metadata.
 
 Snapshots retain all known instances/no initial GC. Bootstrap start is a declared
 initialization window, not proof of complete archive coverage. Never-collected
-or conflicting evidence remains a visible ancestry gap. Large-host capacity and
-production scheduler exclusion must be reviewed before deployment.
+or conflicting evidence remains a visible ancestry gap. Processing metrics are
+operational checkpoints, not telemetry facts; they record successful entity-enabled
+processing and make missed/fallback hours visible to DBT and monitoring. Large-host
+capacity and production scheduler exclusion must be reviewed before deployment.
 
 Input is the name-aligned union of remaining `raw_sensor` and validated `compacted` parquet:
 

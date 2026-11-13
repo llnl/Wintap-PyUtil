@@ -72,6 +72,17 @@ class Dataset:
             relative
         )
 
+    def sibling(self, name: str) -> "Dataset":
+        """Return a named sibling of this dataset root."""
+        component(name)
+        if self.bucket:
+            parent = self.prefix.rsplit("/", 1)[0] if "/" in self.prefix else ""
+            value = f"s3://{self.bucket}"
+            if parent:
+                value += f"/{parent}"
+            return Dataset.parse(value + f"/{name}")
+        return Dataset.parse(str(Path(self.root).parent / name))
+
 
 def separate_roots(source: Dataset, destination: Dataset) -> None:
     if bool(source.bucket) != bool(destination.bucket):
