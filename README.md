@@ -27,6 +27,12 @@ DuckDB **1.5.6** dependency. From this repository root:
 uv run --project extras/raw-sensor-compact --locked raw-sensor-compact --help
 ```
 
+The same worker optionally maintains [durable process snapshots](extras/raw-sensor-compact/README.md#durable-process-entities-round-one)
+in S3. Infrequent DBT builds use them for historical/exited parent context without
+adding lifecycle observations to activity counts. Bootstrap history explicitly
+and exclude readers/writers during updates and builds. See
+[DBT configuration](wintap_dbt/README.md#durable-process-context).
+
 For the full current run process, start with:
 
 ```text

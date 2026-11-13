@@ -10,12 +10,14 @@ from .config import CompactionError, Dataset, Limits, hour_window, separate_root
 from .engine import connection, validate_counts
 from .inventory import Store, discover, recheck
 from .storage import S3Settings, open_s3
+from .entities import EntityLimits, host_name
+from .entity_store import EntityStore, update_entities
 
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     commands = result.add_subparsers(dest="command", required=True)
-    for name in ("plan", "compact", "verify"):
+    for name in ("plan", "compact", "verify", "entities-init", "entities-replay", "entities-verify"):
         command = commands.add_parser(name)
         command.add_argument(
             "--source-root",
@@ -54,6 +56,15 @@ def parser() -> argparse.ArgumentParser:
         command.add_argument("--timeout", type=float, default=300)
         command.add_argument("--max-files", type=int, default=10_000)
         command.add_argument("--max-hours", type=int, default=24)
+        command.add_argument("--process-entity-root")
+        command.add_argument("--entity-host", action="append", default=[])
+        command.add_argument("--entity-namespace")
+        command.add_argument("--max-entity-rows", type=int, default=1_000_000)
+        command.add_argument("--max-entity-bytes", type=int, default=256 * 1024 * 1024)
+        if name == "entities-init":
+            command.add_argument("--allow-empty-host", action="store_true")
+            command.add_argument("--resume-init", action="store_true",
+                                 help="Explicitly resume partial initialization; validate existing hosts")
     return result
 
 
@@ -76,12 +87,57 @@ def run(args) -> tuple[dict, int]:
     settings = S3Settings(
         args.profile, args.region, args.endpoint_url, args.extension_directory
     )
+    entity_root = Dataset.parse(args.process_entity_root) if args.process_entity_root else None
+    if args.command.startswith("entities-") and entity_root is None:
+        raise CompactionError("Entity commands require --process-entity-root")
+    if args.command == "compact" and args.target_size_bytes <= 0:
+        raise CompactionError("A positive explicit target-size byte count is required")
+    if entity_root:
+        separate_roots(source, entity_root)
+        separate_roots(destination, entity_root)
+        if not args.entity_namespace or not args.entity_host:
+            raise CompactionError("Entity mode requires --entity-namespace and --entity-host")
     with connection(limits) as conn:
         client = (
-            open_s3(conn, settings) if source.bucket or destination.bucket else None
+            open_s3(conn, settings) if source.bucket or destination.bucket or (entity_root and entity_root.bucket) else None
         )
         source_store = Store(source, client, deadline=started + limits.timeout)
         merged_store = Store(destination, client, deadline=started + limits.timeout)
+        entity_report, process_inventory = None, None
+        if entity_root:
+            entities = EntityStore(Store(entity_root, client, deadline=started + limits.timeout),
+                                   args.entity_namespace, EntityLimits(args.max_entity_rows, args.max_entity_bytes))
+            if args.command in {"entities-verify", "verify"}:
+                from pathlib import Path
+                from tempfile import TemporaryDirectory
+                report = {"status": "passed", "hosts": []}
+                with TemporaryDirectory(prefix="entity-verify-") as directory:
+                    for host in args.entity_host:
+                        path = Path(directory) / "snapshot.parquet"
+                        if entities.read(host, path) is None:
+                            raise CompactionError("Expected entity snapshot missing")
+                        state, metadata = entities.validate(conn, path, host)
+                        report["hosts"].append({"hostname": host_name(host), "rows": len(state), "metadata": metadata})
+                if args.command == "entities-verify":
+                    return report, 0
+                entity_report = report
+            if args.command != "verify":
+                # Check raw deletion preflight before any entity publication.
+                if getattr(args, "delete_source", False):
+                    from datetime import datetime, timedelta, timezone
+                    grace = args.grace_minutes
+                    if not 5 <= grace <= 1440 or any(
+                        h + timedelta(hours=1, minutes=grace) > datetime.now(timezone.utc) for h in hours
+                    ):
+                        raise CompactionError("Source deletion requires closed UTC hours past a 5–1440 minute grace")
+                entity_report, process_inventory = update_entities(
+                    conn, source_store, merged_store, entities, hours, args.entity_host,
+                    initialize=args.command == "entities-init", plan=args.command == "plan",
+                    allow_empty=getattr(args, "allow_empty_host", False), max_files=limits.max_files,
+                    resume_init=getattr(args, "resume_init", False),
+                )
+                if args.command.startswith("entities-"):
+                    return entity_report, 0
         if args.command in {"plan", "compact"}:
             report = process_hours(
                 conn,
@@ -94,7 +150,10 @@ def run(args) -> tuple[dict, int]:
                 target_size_bytes=getattr(args, "target_size_bytes", None),
                 delete_source=getattr(args, "delete_source", False),
                 grace_minutes=getattr(args, "grace_minutes", 10),
+                process_inventory=process_inventory,
             )
+            if entity_report is not None:
+                report["process_entities"] = entity_report
             return report, 0
         inputs = discover(source_store, hours, events, max_files=limits.max_files)
         merged = discover(merged_store, hours, events, max_files=limits.max_files)
@@ -120,6 +179,8 @@ def run(args) -> tuple[dict, int]:
         report["status"] = (
             ("passed" if passed else "failed") if report["partitions"] else "empty"
         )
+        if entity_report is not None:
+            report["process_entities"] = entity_report
         return report, 0 if passed else 1
 
 

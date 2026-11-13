@@ -30,6 +30,7 @@ def process_hours(
     delete_source=False,
     grace_minutes=10,
     now=None,
+    process_inventory=None,
 ):
     separate_roots(source.dataset, destination.dataset)
     if not plan and (type(target_size_bytes) is not int or target_size_bytes <= 0):
@@ -66,6 +67,13 @@ def process_hours(
             inputs = discover(
                 source, (hour,), (event,), max_files=limits.max_files - processed_files
             )
+            if process_inventory is not None and event == "raw_process":
+                expected = {
+                    leaf: files for leaf, files in process_inventory.groups.items()
+                    if leaf.day == parent.day and leaf.hour == parent.hour
+                }
+                if inputs.groups != expected:
+                    raise CompactionError("Process inputs differ from published entity evidence; no deletion")
             if not inputs.groups:
                 report["hours"].append({**parent.as_dict(), "status": "empty"})
                 continue

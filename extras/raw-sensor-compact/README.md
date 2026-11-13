@@ -183,3 +183,111 @@ exact schemas/bronze/unaffected results. It does not claim every downstream
 result is equivalent or repair DBT semantics. Registry/image-load are absent.
 See the [DBT guide](../../wintap_dbt/README.md#read-only-full-model-test-of-the-surviving-compacted-copy) for a read-only full build of the surviving copy;
 do not rerun the initially-absent-root migration regression against that root.
+
+## Durable process entities (round one)
+
+The worker optionally maintains persistent S3 Parquet process context, separate
+from raw compaction. Local DuckDB state is disposable. One complete snapshot per
+changed host is rewritten, which also compacts entity evidence:
+
+```text
+<dataset>/process_entities/hostPK=<sha256 of trimmed uppercase hostname>/entities.parquet
+```
+
+**Operational requirement:** one writer per dataset; exclude DBT readers for the
+entire update/build. There is no conditional PUT or multi-host transaction. No
+TTL or GC is applied: exited ancestors remain available. Failed publication may
+leave some hosts advanced; replay is safe and no raw deletion starts on failure.
+
+### Bootstrap and hourly operation
+
+Replace every example root/host/namespace before use. The standalone project
+retains DuckDB **2.0.0**; DBT retains **1.5.6**. Windows are completed UTC hours
+with an exclusive end. Bootstrap retained historical raw **and** compacted process
+archives before scheduling hourly updates:
+
+```bash
+uv run --project extras/raw-sensor-compact --locked raw-sensor-compact entities-init \
+  --source-root s3://bucket/dataset/raw_sensor \
+  --destination-root s3://bucket/dataset/compacted \
+  --process-entity-root s3://bucket/dataset/process_entities \
+  --entity-host HOST-A --entity-host HOST-B --entity-namespace pid-v2-dataset-one \
+  --start-hour 2026-11-01T00:00:00Z --end-hour 2026-11-02T00:00:00Z
+```
+
+Use the same roots, hosts, namespace and window flags with:
+
+| Command | Meaning |
+| --- | --- |
+| `entities-init` | Initialize absent host snapshots; `--allow-empty-host` explicitly acknowledges no history. `--resume-init` explicitly resumes partial initialization while validating existing hosts. |
+| `compact --target-size-bytes 134217728 [--delete-source]` | Publish/GET-verify entity snapshots, then existing raw compaction. Process inventories are bound across phases; input drift prevents deletion. |
+| `plan` | Read-only entity preparation plus raw plan; requires initialized hosts, publishes nothing. |
+| `entities-replay` | Explicit late/historical window from both archives; no raw writes or deletion. |
+| `entities-verify` | Validate every expected snapshot's schema, metadata, evidence and resolved fields. |
+| `verify` | Raw counts; with entity flags also verifies snapshots. |
+
+Expected hosts/identity namespace are explicit. New undeclared hosts and missing
+expected snapshots fail closed; never silently recreate deleted history. Rebuild
+corrected/corrupt state with `entities-init` into a **new root**, verify, then
+explicitly switch worker/DBT configuration. Incremental replay adds evidence; it
+cannot retract facts from superseded input. Retained compacted archives are the
+recovery source after small raw files are deleted.
+
+Existing raw destinations still skip and **never** authorize source deletion.
+Entity replay independently revisits skipped/compacted hours but does not reconcile
+raw overlap for DBT facts. Explicit catch-up windows are required after missed jobs;
+first/last partition metadata is not an ingestion cursor or gap-free coverage proof.
+
+### Evidence and resource contract
+
+Recorded hashes are preserved in normalized host scope, never replaced by PID-only
+identity. The namespace declares a dataset identity regime; ambiguous legacy mixtures
+and same-name machines require operator handling. Unknown process keys/PIDs fail
+closed. The modern producer sentinel, named/blank sentinels and negative parent PIDs
+never become invented parent entities.
+
+Typed resolved fields accompany canonical `evidence_json` candidate sets: OS PIDs,
+paired parent hash/PID/kind, birth/Stop FILETIMEs, lifecycle flags, name/path/user/
+arguments and agent IDs. JSON inside Parquet avoids mixed-type nested tuple issues
+across DuckDB pins. File metadata carries version, host, identity namespace, declared
+bootstrap start and timestamp basis, including zero-row initialized hosts.
+
+Reduction is order-independent and replay-idempotent. One real consistent parent
+pair can complete missing context; incompatible real pairs remain conflicted.
+Missing parent PID is completed only within the same real hash. Stop survives
+older Refresh replay. Refresh EventTime is lifecycle effective time, not a new
+observation timestamp. Display choices are deterministic, not historical as-of
+truth; their candidate evidence remains available. No increment-only counters.
+
+Defaults: `--max-entity-rows 1000000`, `--max-entity-bytes 268435456` per host,
+plus existing file/hour/deadline/DuckDB memory/spill limits. Byte checks bound both
+snapshot size and estimated decoded evidence. Python reduction is not spillable;
+prepare hosts on disposable local disk. Measure aggregate staging and large-host
+rewrite time before production. Capacity failure stops visibly, never prunes history.
+
+### DBT and qualification
+
+See [durable ancestry configuration](../../wintap_dbt/README.md#durable-process-context).
+Disabled mode preserves legacy DBT behavior. Enabled mode uses dedicated state/
+context relations, not synthetic lifecycle rows in bronze observations.
+
+Nested `uv run --locked pytest` tests the compactor/state manager. Repository-root
+`uv run --locked --dev pytest` intentionally collects main tests only. Full DBT
+fixtures in `tests/test_process_entities.py` exercise the historical exited bridge
+restoring 33 window seeds, activity-only references, conflicts, missing ancestors,
+cycles and raw/mixed/compacted history.
+
+Optional actual-endpoint qualification uses **only generated fixtures**:
+
+```bash
+RAW_ENTITY_S3_TEST_APPROVED=isolated-write \
+RAW_ENTITY_S3_TEST_PROFILE=your-profile \
+RAW_ENTITY_S3_TEST_ROOT=s3://bucket/entity-tests/dpe-your-unique-run \
+  uv run --locked --dev pytest tests/test_process_entities_s3.py -s
+```
+
+The prefix must start absent. The test creates/replaces snapshots, verifies fixture
+hashes, builds DBT, then compacts/deletes only generated sources and rebuilds from
+compacted history. Outputs remain for review; no cleanup is performed. Lost ACK,
+corrupt GET and partial-host/init failures are injected locally/mocked; the live
+run does not simulate an actual network outage.

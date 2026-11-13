@@ -4,6 +4,7 @@
         {{ return('') }}
     {%- endif -%}
     {% do configure_raw_sensor_access() %}
+    {% do validate_process_entities() %}
     {%- set source = raw_sensor_dataset_path() ~ '/raw_sensor + ' ~ compacted_root_path() -%}
     {% do log('Checking raw source: ' ~ source ~ ' window ' ~ var('start_day') ~ '/' ~ start_hour_pk() ~ ' through ' ~ var('end_day') ~ '/' ~ end_hour_pk(), info=true) %}
     {%- set ns = namespace(sample=none) -%}

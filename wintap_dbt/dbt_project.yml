@@ -13,6 +13,7 @@ snapshot-paths: ['snapshots']
 
 on-run-start:
   - "{{ configure_raw_sensor_access() }}"
+  - "{{ validate_process_entities() }}"
 
 target-path: 'target'
 clean-targets:

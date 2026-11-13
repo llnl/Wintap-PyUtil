@@ -71,6 +71,20 @@ def validate(env, output_only=False):
     a, b = (root.rstrip("/") + "/" for root in roots)
     if a.startswith(b) or b.startswith(a):
         raise ValueError("Raw and compacted input roots must not overlap")
+    entity = env.get("WINTAP_DBT_PROCESS_ENTITY_ROOT", "").rstrip("/")
+    if entity:
+        entity_kind = source_type(entity)
+        entity_path = str(Path(entity).resolve()) if entity_kind == "local" else entity
+        for other in roots:
+            a, b = entity_path.rstrip("/") + "/", other.rstrip("/") + "/"
+            if a.startswith(b) or b.startswith(a):
+                raise ValueError("Process entity root must not overlap raw/compacted inputs")
+        hosts = required(env, "WINTAP_DBT_PROCESS_ENTITY_HOSTS").split(",")
+        if any(not h.strip() for h in hosts):
+            raise ValueError("Expected entity hosts must be a nonempty comma-separated list")
+        required(env, "WINTAP_DBT_PROCESS_ENTITY_NAMESPACE")
+        if entity_kind == "local" and not Path(entity).is_dir():
+            raise ValueError("Process entity root does not exist")
     present = False
     for root, root_kind in ((raw, kind), (compacted, compacted_kind)):
         if root_kind == "s3":

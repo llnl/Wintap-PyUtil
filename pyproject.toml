@@ -88,6 +88,7 @@ pretty = true
 
 [tool.pytest.ini_options]
 pythonpath = ["wintappy"]
+testpaths = ["tests"]
 
 [tool.sqlfluff.core]
 dialect = "duckdb"

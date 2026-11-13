@@ -4,6 +4,54 @@ DBT/DuckDB implementation of the canonical Wintap/Lintap post-processing pipelin
 
 ## Scope
 
+### Durable process context
+
+Optional first-round ancestry enrichment reads compactor-maintained S3 Parquet
+snapshots independently of the analysis window:
+
+```bash
+export WINTAP_DBT_PROCESS_ENTITY_ROOT=s3://bucket/dataset/process_entities
+export WINTAP_DBT_PROCESS_ENTITY_HOSTS=HOST-A,HOST-B
+export WINTAP_DBT_PROCESS_ENTITY_NAMESPACE=pid-v2-dataset-one
+```
+
+All three settings are required together. Initialize historical state first with
+the [standalone entity manager](../extras/raw-sensor-compact/README.md#durable-process-entities-round-one).
+Use one writer per dataset and **pause it for the entire DBT build**, not just
+preflight. Fixed files have no multi-host snapshot transaction. Missing expected
+files, incompatible schema/host/namespace, invalid JSON evidence or contradictory
+stored parent scalars fail preflight. No automatic empty-state fallback.
+
+`stg_process_entities` materializes the validated state and bootstrap provenance.
+`process_entities` resolves paired parents from retained plus current-window
+evidence; contradictory real parents remain unresolved rather than ANY_VALUE.
+`process_context` contains window lifecycle/activity keys and known ancestor closure;
+`context_only`, `activity_only`, `metadata_conflict`, `from_store`, `bootstrap_start`
+and `context_status` distinguish origin/quality. Activity-only references are not
+new Starts, and context-only ancestors are not additional summary seeds.
+
+`process` keeps its window population, counters and timing metrics, but uses
+resolved parent pairs and deterministic display context. Windowed output preserves
+original hostname spelling for existing host/summary joins; only durable lookup
+predicates normalize it. `process_path` keeps
+window seeds and traverses the separate context lookup. `process_ancestry_quality`
+reports root reached, missing parent/ancestor, sentinel, conflicts, PID mismatch
+and cycles; longest available chain alone is not completeness. Accepted roots
+require consistent recorded self-parent identities and the declared
+`WINTAP_DBT_PROCESS_ROOT_PIDS` set (default `0,1,4`; restrict for the dataset/OS).
+Other self-links are cycles. The PID set never creates or repairs parent edges.
+
+Bronze raw observations, duplicate accounting and raw/compacted UNION ALL remain
+unchanged. Disable the root to retain the original model behavior. In enabled mode,
+display/parent results and additional quality columns intentionally differ from
+the legacy model. Parent-context enrichment is not a general rewrite of all
+downstream ANY_VALUE/grouping behavior or arbitrary historical as-of metadata.
+
+Snapshots retain all known instances/no initial GC. Bootstrap start is a declared
+initialization window, not proof of complete archive coverage. Never-collected
+or conflicting evidence remains a visible ancestry gap. Large-host capacity and
+production scheduler exclusion must be reviewed before deployment.
+
 Input is the name-aligned union of remaining `raw_sensor` and validated `compacted` parquet:
 
 ```text
