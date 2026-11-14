@@ -3,6 +3,7 @@
 import io
 import json
 import os
+import stat
 from dataclasses import replace
 from pathlib import Path
 
@@ -585,21 +586,34 @@ def test_new_publication_directory_links_are_fsynced_before_success(
     conn, stores, tmp_path, monkeypatch, publication
 ):
     fsync = os.fsync
+    readlink = os.readlink
     directories = []
 
+    def without_proc(path, *args, **kwargs):
+        if str(path).startswith("/proc/"):
+            raise FileNotFoundError("synthetic platform without procfs")
+        return readlink(path, *args, **kwargs)
+
+    # Enforce portability even when this test runs on Linux.
+    monkeypatch.setattr(os, "readlink", without_proc)
+
     def observed(descriptor):
-        path = Path(os.readlink(f"/proc/self/fd/{descriptor}"))
-        if path.is_dir():
-            directories.append(path)
+        metadata = os.fstat(descriptor)
+        if stat.S_ISDIR(metadata.st_mode):
+            directories.append((metadata.st_dev, metadata.st_ino))
         return fsync(descriptor)
+
+    def was_flushed(path):
+        metadata = path.stat()
+        return (metadata.st_dev, metadata.st_ino) in directories
 
     monkeypatch.setattr(os, "fsync", observed)
     initialize(conn, stores)
     if publication == "authority":
         # The new _authority/ entry itself must persist before host replacement.
-        assert Path(stores[2].store.dataset.root) in directories
+        assert was_flushed(Path(stores[2].store.dataset.root))
     else:
         run(invocation(stores, tmp_path))
         root = Path(stores[0].dataset.sibling("processing_metrics").root)
-        assert root in directories
-        assert root / "dayPK=20260101" in directories
+        assert was_flushed(root)
+        assert was_flushed(root / "dayPK=20260101")

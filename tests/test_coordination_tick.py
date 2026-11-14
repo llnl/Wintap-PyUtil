@@ -367,7 +367,18 @@ def test_writer_cannot_mutate_committed_identity_or_binding_by_changing_callback
         assert run["binding"] == binding(tmp_path)
 
 
-@pytest.mark.parametrize("launch_child", [False, True])
+@pytest.mark.parametrize(
+    "launch_child",
+    [
+        False,
+        pytest.param(
+            True,
+            marks=pytest.mark.skipif(
+                sys.platform != "linux", reason="Linux procfs surviving-child control"
+            ),
+        ),
+    ],
+)
 def test_abrupt_tick_death_never_launches_replacement_even_when_child_survives(
     tmp_path, launch_child
 ):
@@ -506,6 +517,91 @@ def test_long_listing_crossing_grace_refreshes_clock_before_admission(tmp_path):
     assert result["readers"] == 0 and not store.messages("grant")
 
 
+@pytest.mark.parametrize("crosses_grace", [False, True])
+@pytest.mark.parametrize("existing_reader", [False, True])
+def test_ingestion_clock_is_refreshed_before_new_reader_admission(
+    tmp_path, monkeypatch, crosses_grace, existing_reader
+):
+    from wintappy.coordination.coordinator import tick as coordinator_tick
+    from wintappy.coordination.ledger import Ledger
+
+    initialize(tmp_path)
+    _, store = transport()
+    if existing_reader:
+        store.publish(request(tmp_path))
+        tick(tmp_path, store)
+    queued = request(tmp_path, "b" * 32)
+    store.publish(queued)
+    before = "2026-01-02T00:09:59Z"
+    observed = [before]
+    ingest = Ledger.ingest_many
+
+    def delayed(self, messages, now=None):
+        result = ingest(self, messages, now)
+        if crosses_grace:
+            observed[0] = DUE
+        return result
+
+    monkeypatch.setattr(Ledger, "ingest_many", delayed)
+    result = coordinator_tick(
+        tmp_path / "state",
+        binding(tmp_path),
+        store,
+        before,
+        clock=lambda: observed[0],
+    )
+    assert not result["writer_invoked"]
+    assert result["mode"] == ("DRAINING" if crosses_grace else "OPEN")
+    expected_readers = int(existing_reader) + int(not crosses_grace)
+    assert result["readers"] == expected_readers
+    assert result["waiting"] == int(crosses_grace)
+    assert len(store.messages("grant")) == expected_readers
+    with Ledger.open(tmp_path / "state", binding(tmp_path)) as ledger:
+        assert ledger.job(queued["job_id"])["state"] == (
+            "WAITING" if crosses_grace else "GRANTED"
+        )
+        if existing_reader:
+            assert ledger.job("a" * 32)["state"] == "GRANTED"
+
+
+@pytest.mark.parametrize("fault", ["rollback", "unreadable"])
+def test_clock_failure_after_ingestion_cannot_admit_or_revoke_readers(
+    tmp_path, monkeypatch, fault
+):
+    from wintappy.coordination.coordinator import tick as coordinator_tick
+    from wintappy.coordination.ledger import Ledger
+    from wintappy.coordination.protocol import CoordinationError
+
+    initialize(tmp_path)
+    _, store = transport()
+    store.publish(request(tmp_path))
+    tick(tmp_path, store)
+    queued = request(tmp_path, "b" * 32)
+    store.publish(queued)
+    ingested = []
+    ingest = Ledger.ingest_many
+
+    def delayed(self, messages, now=None):
+        result = ingest(self, messages, now)
+        ingested.append(True)
+        return result
+
+    def clock():
+        if not ingested:
+            return "2026-01-02T00:09:59Z"
+        if fault == "rollback":
+            return NOW
+        raise OSError("synthetic post-ingestion clock failure")
+
+    monkeypatch.setattr(Ledger, "ingest_many", delayed)
+    with pytest.raises(CoordinationError, match="clock"):
+        coordinator_tick(tmp_path / "state", binding(tmp_path), store, NOW, clock=clock)
+    with Ledger.open(tmp_path / "state", binding(tmp_path)) as ledger:
+        assert ledger.snapshot()["readers"] == 1
+        assert ledger.job(queued["job_id"])["state"] == "WAITING"
+    assert len(store.messages("grant")) == 1
+
+
 def test_clock_failure_or_rollback_before_ingestion_preserves_reservation(tmp_path):
     from wintappy.coordination.coordinator import tick as coordinator_tick
     from wintappy.coordination.ledger import Ledger
@@ -612,6 +708,7 @@ def test_post_writer_clock_failure_still_blocks_committed_intent(tmp_path, fault
         )
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux subreaper contract")
 def test_real_supervised_callback_holds_ledger_lock_and_still_cannot_certify_empty_hour(
     tmp_path,
 ):
@@ -676,6 +773,7 @@ print(json.dumps({'status':'empty','exit_code':0}))
     assert not tick(tmp_path, store, DUE)["writer_invoked"]
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux subreaper contract")
 def test_supervisor_death_with_surviving_workload_remains_blocked(tmp_path):
     import os
     import signal
@@ -717,3 +815,32 @@ time.sleep(60)
                 os.kill(int(pidfile.read_text()), signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+
+@pytest.mark.parametrize("platform", ["darwin", "win32"])
+def test_unsupported_writer_supervision_refuses_launch_and_tick_stays_blocked(
+    tmp_path, monkeypatch, platform
+):
+    from wintappy.coordination import supervisor
+    from wintappy.coordination.protocol import CoordinationError
+
+    initialize(tmp_path)
+    _, store = transport()
+    store.publish(request(tmp_path))
+    monkeypatch.setattr(supervisor.sys, "platform", platform)
+    monkeypatch.setattr(
+        supervisor.subprocess,
+        "Popen",
+        lambda *a, **kw: pytest.fail("unsupported launch"),
+    )
+    command = [sys.executable, "-B", "-c", "print('synthetic')"]
+    directory = tmp_path / "observations"
+    with pytest.raises(CoordinationError, match="requires Linux"):
+        supervisor.run_supervised(command, directory)
+    assert not directory.exists()
+    result = tick(
+        tmp_path, store, DUE, lambda run: supervisor.run_supervised(command, directory)
+    )
+    assert result["mode"] == "BLOCKED" and result["next_hour"] == HOUR
+    assert result["waiting"] == 1 and not store.messages("grant")
+    assert not directory.exists()

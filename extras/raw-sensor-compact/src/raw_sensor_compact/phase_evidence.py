@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 from dataclasses import asdict
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -157,15 +158,14 @@ def load_archive(root, run_id):
         raise CompactionError("Original run evidence record budget/shape invalid")
     records, previous, total = [], "", 0
     for sequence, path in enumerate(paths):
-        size = path.stat().st_size
+        size = path.lstat().st_size
         total += size
         if path.is_symlink() or size > MAX_RECORD_BYTES or total > MAX_ARCHIVE_BYTES:
             raise CompactionError("Original run evidence exceeds archive budget")
         try:
-            with path.open("rb") as stream:
-                encoded = stream.read(
-                    min(MAX_RECORD_BYTES, MAX_ARCHIVE_BYTES - total + size) + 1
-                )
+            encoded = read_local_record(
+                path, min(MAX_RECORD_BYTES, MAX_ARCHIVE_BYTES - total + size)
+            )
             if len(encoded) != size:
                 raise ValueError
             record = json.loads(encoded)
@@ -212,6 +212,54 @@ def load_archive(root, run_id):
     if records[0]["phase"] != "run_intent":
         raise CompactionError("Original run evidence intent missing")
     return records
+
+
+def read_local_record(path, budget):
+    """Read bounded immutable local bytes without blocking on nonregular files."""
+    path = Path(path)
+    descriptor = None
+    try:
+        if any(p.is_symlink() for p in (path, *path.parents)):
+            raise ValueError
+        before = path.lstat()
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or before.st_size > budget
+        ):
+            raise ValueError
+        descriptor = os.open(
+            path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+        )
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or (opened.st_dev, opened.st_ino, opened.st_size)
+            != (before.st_dev, before.st_ino, before.st_size)
+        ):
+            raise ValueError
+        with os.fdopen(descriptor, "rb") as stream:
+            descriptor = None
+            payload = stream.read(budget + 1)
+            after = os.fstat(stream.fileno())
+        current = path.lstat()
+        if (
+            len(payload) != before.st_size
+            or len(payload) > budget
+            or after.st_nlink != 1
+            or (current.st_dev, current.st_ino, current.st_size, current.st_nlink)
+            != (before.st_dev, before.st_ino, before.st_size, 1)
+        ):
+            raise ValueError
+        return payload
+    except (OSError, ValueError):
+        raise CompactionError(
+            "Original evidence requires bounded single-link regular records"
+        ) from None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 
 
 def object_digest(store, file):

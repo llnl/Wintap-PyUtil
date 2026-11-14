@@ -19,6 +19,10 @@ stores = stores_fixture
 def rewrite(conn, entities, rows, metadata=None):
     target = Path(entities.store.dataset.root) / entities.relative("HOST")
     metadata = metadata or entities.sql_metadata(conn, target)
+    return rewrite_candidate(conn, target, rows, metadata)
+
+
+def rewrite_candidate(conn, target, rows, metadata):
     conn.execute(
         "create or replace temp table corrupt as "
         "select * from read_parquet(?, hive_partitioning=false)",
@@ -111,6 +115,72 @@ CORRUPTIONS = [
         )
     ],
 ]
+
+
+# Specific SQL diagnostics distinguish integrity rejection from authority freshness.
+SQL_DIAGNOSTICS = (
+    ["Invalid/duplicate entity instance key"] * 5
+    + ["Invalid entity publication bounds"] * 4
+    + ["Entity scalar fields disagree with evidence"] * 13
+    + ["Invalid process entity evidence", "Invalid process entity evidence structure"]
+    + ["Invalid process entity evidence structure"] * 4
+    + ["Invalid process entity evidence types"] * 6
+    + ["Invalid process entity evidence structure"]
+    + ["Invalid process entity evidence types"] * 5
+)
+assert len(CORRUPTIONS) == len(SQL_DIAGNOSTICS)
+
+
+@pytest.mark.parametrize(
+    "corruption,diagnostic", list(zip(CORRUPTIONS, SQL_DIAGNOSTICS, strict=True))
+)
+@pytest.mark.parametrize("entrypoint", ["validate_sql", "update_candidate"])
+def test_sql_integrity_rejects_corruption_independently_of_authority(
+    conn, stores, monkeypatch, corruption, diagnostic, entrypoint
+):
+    from raw_sensor_compact import entity_sql
+
+    source, compacted, entities = stores
+    seed(conn, source)
+    update_entities(conn, source, compacted, entities, HOURS, ["HOST"], initialize=True)
+    target = Path(entities.store.dataset.root) / entities.relative("HOST")
+    authority = Path(entities.store.dataset.root) / "_authority/authority.parquet"
+    original_authority = authority.read_bytes()
+    monkeypatch.setattr(
+        Evidence, "restore", lambda *a: pytest.fail("Python entity decoding")
+    )
+    if entrypoint == "validate_sql":
+        target = rewrite(conn, entities, corruption)
+        before = target.read_bytes()
+        with pytest.raises(CompactionError, match=diagnostic):
+            entities.validate_sql(conn, target, "HOST", None)
+    else:
+        # Keep trusted committed bytes intact. Mutate the next publication candidate
+        # inside write_state, before its original SQL validator and authority PUT.
+        seed(conn, source, hour="01")
+        before = target.read_bytes()
+        validate = entity_sql.validate_state
+        checked = []
+
+        def corrupt_candidate(connection, path, host, metadata, limits):
+            checked.append(True)
+            rewrite_candidate(connection, path, corruption, metadata)
+            return validate(connection, path, host, metadata, limits)
+
+        monkeypatch.setattr(entity_sql, "validate_state", corrupt_candidate)
+        with pytest.raises(CompactionError, match=diagnostic):
+            update_entities(conn, source, compacted, entities, HOURS, ["HOST"])
+        assert checked == [True]
+    assert target.read_bytes() == before
+    assert authority.read_bytes() == original_authority
+    assert list(Path(source.dataset.root).glob("**/*.parquet"))
+    assert (
+        conn.execute(
+            "select count(*) from duckdb_tables() "
+            "where table_name like 'entity_validation_%'"
+        ).fetchone()[0]
+        == 0
+    )
 
 
 @pytest.mark.parametrize("corruption", CORRUPTIONS)

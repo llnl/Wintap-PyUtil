@@ -1,0 +1,28 @@
+{
+  "baseline_parent_commit": "fe7fcb5518db5b2df5f6322a1e42cd241ff3d7d4",
+  "files": {
+    "extras/raw-sensor-compact/pyproject.toml": "37d7457cb00586f8e55c22bf76282cdef276846f1591152fca13a90e31c41586",
+    "extras/raw-sensor-compact/src/raw_sensor_compact/completion.py": "3e8fe015230264c84f0cf225668da608ffc57cf4b73c190faf85394949615319",
+    "extras/raw-sensor-compact/src/raw_sensor_compact/phase_evidence.py": "700d49114205277029cada109584d562600327e2c587831b4acf139f2246bebb",
+    "extras/raw-sensor-compact/tests/test_completion_verifier.py": "6e4b0b6abd736152ff39659cdea2a45ae31ddc9e39e2617176a6c00600c48be6",
+    "extras/raw-sensor-compact/tests/test_entity_integrity.py": "34a3dccaa1584625ddc8545578e1c56b975f366dcdef244b0c34360ae236edea",
+    "extras/raw-sensor-compact/tests/test_phase_evidence.py": "6498a68bb8715296e4e7dca288acae8a267ef1056c52e0f0108817289ba4a897",
+    "extras/raw-sensor-compact/uv.lock": "934d08aa56a63e9136a8c6218917051dea67664b56774da55cd1e541b79eda5e",
+    "pyproject.toml": "7f7d713687099730ba8c5a97c60f2fba578b291a13e864e7927b547a7f62e456",
+    "tests/test_coordination_authority.py": "163385c7cfc9ba7c452c32b26e83aa322b1ea933861a2833ec651569368f505f",
+    "tests/test_coordination_completion.py": "d41ff0b8bdf45ff26ebad6d2de5a8f4d369092378d09da3b1a2d859ec93d754d",
+    "tests/test_coordination_completion_controls.py": "a4fc61315adeeba844e1e2e4b28b89ce913f8ed45959f15af2bb0a67a6cb2ac9",
+    "tests/test_coordination_execution.py": "95f31366a22f478acd7c0b79e01c78e2b41f5ef04e0826fcb156b3460dad0948",
+    "tests/test_coordination_tick.py": "a74204d48c91a4c8951d99d6bec6973f0fa5718dc462292a8e80a85d03e48434",
+    "tests/test_coordination_verification.py": "aa881d0f27099597e1faa6f5bb7a81feec11eb402b4d793b4180327e7a097170",
+    "uv.lock": "61912ee3abb9e095b46e03fba4a021272d77bed9f1235a8901e92a92a5d9d367",
+    "wintappy/coordination/authority.py": "4298408c2bd8cbca08cd317d1401208d2f697aa266effd96eee34e2b2ac09f1f",
+    "wintappy/coordination/completion.py": "af130ed500d00b808db69d2e3fbf7daf7fd90a8e608df2fca5f9770b092902c7",
+    "wintappy/coordination/coordinator.py": "ce339cbc0eb41ecf98c25e56f65c8cca3f70ded7e193178a23d0b23c05a05a22",
+    "wintappy/coordination/execution.py": "55b33f0ea067f7be75584d50444747e729ff5526d51d4ab2b7926eb4282ba74c",
+    "wintappy/coordination/ledger.py": "00f19d1b9d52bca8e421e49de1072bebf092421e8b5172462d1bd5e1474297d2",
+    "wintappy/coordination/verification.py": "6e5c58f6972b7cd28517d0be035abcfe5d16dacf057f869b9cc488971b9abd6e",
+    "wintappy/coordination/writer.py": "2e964b2c72c9fe5a120f82d9b47cd8cd6421bd0927d5a3d0e7169c6e0241d49b"
+  },
+  "version": 2
+}

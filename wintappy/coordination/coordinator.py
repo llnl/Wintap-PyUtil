@@ -86,6 +86,9 @@ def tick(
         ]
         now = observed_clock.observe()
         ledger.ingest_many(chain.from_iterable(messages), now)
+        # Ingestion itself may cross grace or break the clock. Observe again before
+        # creating any new permission; previously committed readers remain reserved.
+        now = observed_clock.observe()
         state = ledger.snapshot()
         invoked = False
         if state["mode"] == "BLOCKED":
