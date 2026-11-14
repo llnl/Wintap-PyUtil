@@ -116,6 +116,21 @@ def test_init_replay_noop_restart_compacted_history(conn, stores, tmp_path):
     assert state(conn, entities, tmp_path)["child"].row("HOST", "child")["seen_stop"]
 
 
+def test_sql_reducer_clears_conflicting_lifetime_scalars(conn, stores, tmp_path):
+    source, compacted, entities = stores
+    seed(conn, source)
+    seed(
+        conn,
+        source,
+        observation(activitytype="STOP", eventtime=50),
+        filename="conflict.parquet",
+    )
+    update_entities(conn, source, compacted, entities, HOURS, ["HOST"], initialize=True)
+    row = state(conn, entities, tmp_path)["child"].row("HOST", "child")
+    assert row["lifetime_status"] == "conflicted"
+    assert row["birth_filetime"] is None and row["stop_filetime"] is None
+
+
 def test_pid_reuse_and_host_scope(conn, stores, tmp_path):
     source, compacted, entities = stores
     seed(conn, source)

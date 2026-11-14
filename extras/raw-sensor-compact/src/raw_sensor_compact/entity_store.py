@@ -8,7 +8,7 @@ from tempfile import TemporaryDirectory
 
 from botocore.exceptions import ClientError
 
-from .config import CompactionError, separate_roots
+from .config import CompactionError, separate_roots, utc_hour
 from .entities import (
     DEFAULT_IDENTITY_MAX_RATIO,
     SCHEMA,
@@ -19,6 +19,13 @@ from .entities import (
     host_key,
     host_name,
     rows,
+)
+from .entity_sql import (
+    build_state,
+    state_count,
+    state_hash,
+    validate_state,
+    write_state,
 )
 from .inventory import Inventory, discover
 from .storage import quote
@@ -216,6 +223,44 @@ class EntityStore:
         )
         self.validate(conn, path, host)
 
+    def build_sql_state(self, conn, old_paths=()):
+        build_state(conn, old_paths)
+
+    def sql_state_count(self, conn, host):
+        return state_count(conn, host)
+
+    def sql_state_hash(self, conn, host, path=None):
+        return state_hash(conn, host, path)
+
+    def write_sql(self, conn, path, host, metadata):
+        try:
+            return write_state(conn, path, host, metadata, self.limits)
+        except ValueError as error:
+            raise CompactionError(str(error)) from None
+
+    def validate_sql(self, conn, path, host, metadata):
+        try:
+            if metadata is None:
+                stored = dict(
+                    conn.execute(
+                        "SELECT decode(key), decode(value) FROM parquet_kv_metadata(?)",
+                        [str(path)],
+                    ).fetchall()
+                )
+                metadata = self.metadata(host, stored.get("bootstrap_start", ""))
+            utc_hour(metadata["bootstrap_start"])
+            validate_state(conn, path, host, metadata, self.limits)
+        except ValueError as error:
+            raise CompactionError(str(error)) from None
+
+    def sql_metadata(self, conn, path):
+        return dict(
+            conn.execute(
+                "SELECT decode(key), decode(value) FROM parquet_kv_metadata(?)",
+                [str(path)],
+            ).fetchall()
+        )
+
 
 def entity_inventory(store, hours, max_files):
     # Either archive root may be absent locally, e.g. first bootstrap before COPY.
@@ -307,6 +352,8 @@ def update_entities(
     with TemporaryDirectory(prefix="process-entities-") as directory:
         directory = Path(directory)
         prepared = []
+        old_paths = []
+        snapshots = {}
         for host in hosts:
             old = directory / (host_key(host) + "-old.parquet")
             identity = entities.read(host, old)
@@ -318,55 +365,40 @@ def update_entities(
                 raise CompactionError(
                     "Expected entity snapshot missing; initialize/rebuild explicitly"
                 )
-            if identity is None:
-                state, metadata = (
-                    {},
-                    entities.metadata(host, hours[0].strftime("%Y-%m-%dT%H:00:00Z")),
-                )
-            else:
-                state, metadata = entities.validate(conn, old, host)
-            before = canonical(
-                {key: e.row(host, key) for key, e in sorted(state.items())}
-            )
-            decoded_bytes = sum(e.bytes + 1024 for e in state.values())
-            for row in rows(
-                conn, "SELECT * FROM entity_input WHERE hostname=?", [host]
-            ):
-                key = row["pidhash"]
-                if key not in state:
-                    state[key] = Evidence()
-                    decoded_bytes += 1024
-                previous_bytes = state[key].bytes
-                state[key].observe(row)
-                decoded_bytes += state[key].bytes - previous_bytes
-                if decoded_bytes > entities.limits.max_bytes:
-                    raise CompactionError("Entity decoded state exceeds byte budget")
-                if len(state) > entities.limits.max_rows:
-                    raise CompactionError("Entity snapshot exceeds row budget")
-                entities.store.check_deadline()
-            after = canonical(
-                {key: e.row(host, key) for key, e in sorted(state.items())}
-            )
-            if len(after) > entities.limits.max_bytes:
-                raise CompactionError("Entity decoded state exceeds byte budget")
+            metadata = entities.metadata(host, hours[0].strftime("%Y-%m-%dT%H:00:00Z"))
+            if identity is not None:
+                entities.validate_sql(conn, old, host, None)
+            snapshots[host] = (old, identity, metadata)
+            if identity is not None:
+                old_paths.append(old)
+
+        # The working entity state is a DuckDB relation.  DuckDB owns hash
+        # aggregation, spilling and parallel execution; Python retains only
+        # snapshot paths and publication metadata.
+        entities.build_sql_state(conn, old_paths)
+        for host in hosts:
+            old, identity, metadata = snapshots[host]
+            before = entities.sql_state_hash(conn, host, old) if identity else ""
+            after = entities.sql_state_hash(conn, host)
             changed = identity is None or before != after
             candidate = directory / (host_key(host) + "-new.parquet")
             if changed:
-                entities.write(conn, candidate, host, state, metadata)
+                entities.write_sql(conn, candidate, host, metadata)
             report["hosts"].append(
                 {
                     "hostname": host,
-                    "rows": len(state),
+                    "rows": entities.sql_state_count(conn, host),
                     "changed": changed,
-                    "semantic_sha256": hashlib.sha256(after.encode()).hexdigest(),
+                    "semantic_sha256": after,
                     "bootstrap_start": metadata["bootstrap_start"],
                     "snapshot_bytes": candidate.stat().st_size
                     if changed
                     else old.stat().st_size,
-                    "parent_conflicts": sum(
-                        e.row(host, k)["parent_status"] == "conflicted"
-                        for k, e in state.items()
-                    ),
+                    "parent_conflicts": conn.execute(
+                        "SELECT count(*) FROM entity_state "
+                        "WHERE hostname=? AND parent_status='conflicted'",
+                        [host],
+                    ).fetchone()[0],
                 }
             )
             prepared.append((host, candidate, identity, changed))
@@ -388,7 +420,12 @@ def update_entities(
                             raise CompactionError(
                                 "Published entity content verification failed"
                             )
-                        entities.validate(conn, check, host)
+                        entities.validate_sql(
+                            conn,
+                            check,
+                            host,
+                            snapshots[host][2],
+                        )
             except Exception:
                 raise CompactionError(
                     "Entity publication/verification failed; no source deletion; "

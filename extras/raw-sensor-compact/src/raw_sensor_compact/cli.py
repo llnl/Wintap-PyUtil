@@ -254,11 +254,15 @@ def run(args) -> tuple[dict, int]:
                         path = Path(directory) / "snapshot.parquet"
                         if entities.read(host, path) is None:
                             raise CompactionError("Expected entity snapshot missing")
-                        state, metadata = entities.validate(conn, path, host)
+                        entities.validate_sql(conn, path, host, None)
+                        metadata = entities.sql_metadata(conn, path)
+                        rows = conn.execute(
+                            "SELECT count(*) FROM read_parquet(?)", [str(path)]
+                        ).fetchone()[0]
                         report["hosts"].append(
                             {
                                 "hostname": host_name(host),
-                                "rows": len(state),
+                                "rows": rows,
                                 "metadata": metadata,
                             }
                         )
@@ -295,7 +299,12 @@ def run(args) -> tuple[dict, int]:
                 )
                 if args.command.startswith("entities-"):
                     if args.command in {"entities-init", "entities-replay"}:
-                        publish_metrics({"hours": [], "partitions": []}, args.command)
+                        metrics_report = {"hours": [], "partitions": []}
+                        publish_metrics(metrics_report, args.command)
+                        if "processing_metrics" in metrics_report:
+                            entity_report["processing_metrics"] = metrics_report[
+                                "processing_metrics"
+                            ]
                     return entity_report, 0
         if args.command in {"plan", "compact"}:
             report = process_hours(

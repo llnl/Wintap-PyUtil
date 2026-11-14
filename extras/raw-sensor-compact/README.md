@@ -221,6 +221,13 @@ changed host is rewritten, which also compacts entity evidence:
 <dataset>/processing_metrics/dayPK=YYYYMMDD/hourPK=HH/metrics.parquet
 ```
 
+Entity reduction is performed in DuckDB 2.0.0 relations with SQL aggregation and
+spill support; it does not retain one Python `Evidence` object per process in the
+working state. The Parquet snapshot keeps `evidence_json` as the interoperable
+durable representation consumed by DBT, while DuckDB manages the working tables,
+joins, grouping and memory pressure. Source observations remain preserved and
+are replayed into the SQL state on later updates.
+
 **Operational requirement:** one writer per dataset; exclude DBT readers for the
 entire update/build. There is no conditional PUT or multi-host transaction. No
 TTL or GC is applied: exited ancestors remain available. Failed publication may
