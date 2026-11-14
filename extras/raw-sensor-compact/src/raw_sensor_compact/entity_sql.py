@@ -9,7 +9,7 @@ Python dictionary containing one Evidence object per process instance.
 
 from pathlib import Path
 
-from .entities import SCHEMA
+from .entities import FIELDS, SCHEMA, host_name
 from .storage import quote
 
 
@@ -115,9 +115,20 @@ def build_state(conn, old_paths=()):
         GROUP BY hostname, pidhash
         """
     )
+    _reduce_state(conn)
+
+
+def _reduce_state(
+    conn, values="entity_values", bounds="entity_bounds", target="entity_state"
+):
+    """One SQL derivation for reduction and evidence/scalar verification.
+
+    Relation names are private constants, never caller-controlled SQL identifiers.
+    Validation uses separate spillable relations so it cannot alter update state.
+    """
     conn.execute(
-        """
-        CREATE TEMP TABLE entity_state AS
+        f"""
+        CREATE TEMP TABLE {target} AS
         WITH grouped AS (
             SELECT hostname, pidhash,
                 list_sort(list_distinct(list(value) FILTER (WHERE field='pids'))) pids,
@@ -130,7 +141,7 @@ def build_state(conn, old_paths=()):
                 list_sort(list_distinct(list(value) FILTER (WHERE field='args'))) args_values,
                 list_sort(list_distinct(list(value) FILTER (WHERE field='agents'))) agents,
                 list_sort(list_distinct(list(value) FILTER (WHERE field='activities'))) activities
-            FROM entity_values
+            FROM {values}
             GROUP BY hostname, pidhash
         ), arrays AS (
             SELECT *,
@@ -235,8 +246,8 @@ def build_state(conn, old_paths=()):
             )::VARCHAR evidence_json,
             b.first_partition, b.last_partition
         FROM scalar s
-        JOIN parent_stats p USING (hostname, pidhash)
-        JOIN entity_bounds b USING (hostname, pidhash)
+        LEFT JOIN parent_stats p USING (hostname, pidhash)
+        JOIN {bounds} b USING (hostname, pidhash)
         """
     )
 
@@ -304,71 +315,125 @@ def validate_state(conn, path, host, metadata, limits):
     )
     if count > limits.max_rows or Path(path).stat().st_size > limits.max_bytes:
         raise ValueError("Entity snapshot exceeds row/byte budget")
-    invalid = conn.execute(
-        "SELECT count(*) FROM read_parquet(?) "
-        "WHERE NOT json_valid(evidence_json) OR upper(trim(hostname)) <> upper(trim(?))",
-        [str(path), host],
-    ).fetchone()[0]
-    if invalid:
-        raise ValueError("Invalid entity snapshot evidence")
-    parent_mismatch = conn.execute(
+    # Read-only view, not Python rows or decoded Evidence instances. Expansion and
+    # derivation below are DuckDB-owned and may spill under the command's limits.
+    conn.execute(
+        "CREATE OR REPLACE TEMP VIEW entity_validation_stored AS "
+        f"SELECT * FROM read_parquet({quote(str(path))}, hive_partitioning=false)"
+    )
+    try:
+        _validate_evidence(conn, host_name(host))
+    finally:
+        for name in ("expected", "values", "bounds"):
+            conn.execute(f"DROP TABLE IF EXISTS entity_validation_{name}")
+        conn.execute("DROP VIEW entity_validation_stored")
+
+
+def _validate_evidence(conn, host):
+    invalid, duplicates = conn.execute(
         """
-        WITH stored AS (
-            SELECT * FROM read_parquet(?)
-        ), candidates AS (
-            SELECT s.hostname, s.pid_hash, s.parent_pid_hash,
-                   s.parent_os_pid, s.parent_status,
-                   json_extract_string(j.value, '$[0]') parent_hash,
-                   try_cast(json_extract_string(j.value, '$[1]') AS BIGINT) parent_pid
-            FROM stored s, json_each(s.evidence_json, '$.parents') j
-        ), classified AS (
-            SELECT *,
-                parent_hash IS NOT NULL
-                AND upper(trim(parent_hash)) NOT IN
-                    ('', 'UNKNOWN', 'NA', '-1', '0',
-                     '00000000000000000000000000000000')
-                AND upper(trim(parent_hash)) <> upper(md5(
-                    'N`Process`' || upper(md5(
-                        'Process_ID`llnl`0`' || upper(trim(hostname)) || '`-1`'
-                    )) || '`'
-                ))
-                AND (parent_pid IS NULL OR parent_pid >= 0) AS real_parent,
-                parent_hash IS NOT NULL OR parent_pid < 0 AS sentinel_parent
-            FROM candidates
-        ), stats AS (
-            SELECT hostname, pid_hash,
-                count(*) FILTER (WHERE real_parent) real_count,
-                count(DISTINCT parent_hash) FILTER (WHERE real_parent) real_hashes,
-                count(DISTINCT parent_pid) FILTER (
-                    WHERE real_parent AND parent_pid IS NOT NULL
-                ) real_pids,
-                min(parent_hash) FILTER (WHERE real_parent) parent_hash,
-                min(parent_pid) FILTER (
-                    WHERE real_parent AND parent_pid IS NOT NULL
-                ) parent_pid,
-                count(*) FILTER (WHERE sentinel_parent) sentinel_count
-            FROM classified
-            GROUP BY hostname, pid_hash
-        ), expected AS (
-            SELECT hostname, pid_hash,
-                CASE WHEN real_hashes > 1 OR real_pids > 1 THEN NULL
-                     WHEN real_count > 0 THEN parent_hash END expected_hash,
-                CASE WHEN real_hashes > 1 OR real_pids > 1 THEN NULL
-                     WHEN real_count > 0 THEN parent_pid END expected_pid,
-                CASE WHEN real_hashes > 1 OR real_pids > 1 THEN 'conflicted'
-                     WHEN real_count > 0 THEN 'resolved'
-                     WHEN sentinel_count > 0 THEN 'sentinel'
-                     ELSE 'missing' END expected_status
-            FROM stats
-        )
-        SELECT count(*)
-        FROM stored s
-        LEFT JOIN expected e USING (hostname, pid_hash)
-        WHERE s.parent_pid_hash IS DISTINCT FROM e.expected_hash
-           OR s.parent_os_pid IS DISTINCT FROM e.expected_pid
-           OR s.parent_status IS DISTINCT FROM e.expected_status
+        SELECT count(*) FILTER (WHERE
+            hostname IS DISTINCT FROM ? OR pid_hash IS NULL
+            OR upper(trim(pid_hash)) IN ('', 'UNKNOWN', 'NA', '-1', '0',
+                '00000000000000000000000000000000')
+            OR upper(trim(pid_hash)) = upper(md5('N`Process`' || upper(md5(
+                'Process_ID`llnl`0`' || ? || '`-1`')) || '`'))),
+            count(*) - count(DISTINCT pid_hash)
+        FROM entity_validation_stored
         """,
-        [str(path)],
-    ).fetchone()[0]
-    if parent_mismatch:
+        [host, host],
+    ).fetchone()
+    if invalid or duplicates:
+        raise ValueError("Invalid/duplicate entity instance key")
+    if conn.execute(
+        """
+        SELECT count(*) FROM entity_validation_stored
+        WHERE first_partition IS NULL OR last_partition IS NULL
+           OR NOT regexp_full_match(first_partition, '[0-9]{10}')
+           OR NOT regexp_full_match(last_partition, '[0-9]{10}')
+           OR try_strptime(first_partition, '%Y%m%d%H') IS NULL
+           OR try_strptime(last_partition, '%Y%m%d%H') IS NULL
+           OR first_partition > last_partition
+        """
+    ).fetchone()[0]:
+        raise ValueError("Invalid entity publication bounds")
+    if conn.execute(
+        "SELECT count(*) FROM entity_validation_stored "
+        "WHERE NOT coalesce(json_valid(evidence_json), false)"
+    ).fetchone()[0]:
+        raise ValueError("Invalid process entity evidence")
+    fields = ",".join(quote(field) for field in FIELDS)
+    if conn.execute(
+        f"""
+        SELECT count(*) FROM entity_validation_stored s
+        WHERE json_type(evidence_json) <> 'OBJECT'
+           OR (SELECT count(*) FROM json_each(s.evidence_json)) <> {len(FIELDS)}
+           OR (SELECT count(DISTINCT key) FROM json_each(s.evidence_json)) <> {len(FIELDS)}
+           OR EXISTS (SELECT 1 FROM json_each(s.evidence_json) f
+                      WHERE f.key NOT IN ({fields}) OR f.type <> 'ARRAY')
+           OR json_array_length(evidence_json, '$.pids') = 0
+           OR json_array_length(evidence_json, '$.activities') = 0
+        """
+    ).fetchone()[0]:
+        raise ValueError("Invalid process entity evidence structure")
+    conn.execute(
+        """
+        CREATE TEMP TABLE entity_validation_values AS
+        SELECT s.hostname, s.pid_hash AS pidhash, f.key AS field,
+               json(v.value)::VARCHAR AS value, v.type
+        FROM entity_validation_stored s, json_each(s.evidence_json) f,
+             json_each(f.value) v
+        """
+    )
+    if conn.execute(
+        """
+        SELECT count(*) FROM entity_validation_values
+        WHERE (field IN ('pids', 'births', 'stops') AND (
+                  type NOT IN ('BIGINT', 'UBIGINT')
+                  OR try_cast(value AS BIGINT) IS NULL OR try_cast(value AS BIGINT) < 0))
+           OR (field IN ('names', 'paths', 'users', 'args', 'agents', 'activities')
+               AND type <> 'VARCHAR')
+           OR (field = 'activities' AND value NOT IN ('"START"', '"REFRESH"', '"STOP"'))
+           OR (field = 'parents' AND (
+                  type <> 'ARRAY' OR json_array_length(value) <> 3
+                  OR json_type(value, '$[0]') NOT IN ('NULL', 'VARCHAR')
+                  OR json_type(value, '$[1]') NOT IN ('NULL', 'BIGINT', 'UBIGINT')
+                  OR (json_type(value, '$[1]') <> 'NULL'
+                      AND try_cast(json_extract_string(value, '$[1]') AS BIGINT) IS NULL)
+                  OR coalesce(json_extract_string(value, '$[2]'), '')
+                     NOT IN ('START', 'REFRESH', 'STOP')))
+        """
+    ).fetchone()[0]:
+        raise ValueError("Invalid process entity evidence types")
+    if conn.execute(
+        """
+        SELECT count(*) FROM (
+            SELECT hostname, pidhash, field FROM entity_validation_values
+            GROUP BY hostname, pidhash, field
+            HAVING count(*) <> count(DISTINCT value)
+        )
+        """
+    ).fetchone()[0]:
+        raise ValueError("Invalid duplicate process entity evidence")
+    conn.execute(
+        """
+        CREATE TEMP TABLE entity_validation_bounds AS
+        SELECT hostname, pid_hash AS pidhash, first_partition, last_partition
+        FROM entity_validation_stored
+        """
+    )
+    _reduce_state(
+        conn,
+        "entity_validation_values",
+        "entity_validation_bounds",
+        "entity_validation_expected",
+    )
+    columns = [field for field in SCHEMA if field != "evidence_json"]
+    stored = ",".join("s." + field for field in columns)
+    expected = ",".join("e." + field for field in columns)
+    if conn.execute(
+        "SELECT count(*) FROM entity_validation_stored s "
+        "FULL JOIN entity_validation_expected e USING (hostname, pid_hash) "
+        f"WHERE row({stored}) IS DISTINCT FROM row({expected})"
+    ).fetchone()[0]:
         raise ValueError("Entity scalar fields disagree with evidence")

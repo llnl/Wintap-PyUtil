@@ -228,6 +228,14 @@ durable representation consumed by DBT, while DuckDB manages the working tables,
 joins, grouping and memory pressure. Source observations remain preserved and
 are replayed into the SQL state on later updates.
 
+Operational snapshot validation also stays SQL-backed: it checks canonical host
+scope, valid/unique instance keys, exact evidence fields and element types, valid
+publication-hour bounds, and every derived scalar/lifecycle flag against retained
+evidence. Validation uses separate temporary relations under the configured DuckDB
+memory/spill limits, not a decoded Python object per entity. Existing validated
+bootstrap metadata is retained for changed and unchanged updates, replay and resumed
+initialization; a later update window never replaces that provenance.
+
 **Operational requirement:** one writer per dataset; exclude DBT readers for the
 entire update/build. There is no conditional PUT or multi-host transaction. No
 TTL or GC is applied: exited ancestors remain available. Failed publication may
@@ -323,10 +331,13 @@ observation timestamp. Display choices are deterministic, not historical as-of
 truth; their candidate evidence remains available. No increment-only counters.
 
 Defaults: `--max-entity-rows 1000000`, `--max-entity-bytes 268435456` per host,
-plus existing file/hour/deadline/DuckDB memory/spill limits. Byte checks bound both
-snapshot size and estimated decoded evidence. Python reduction is not spillable;
-prepare hosts on disposable local disk. Measure aggregate staging and large-host
-rewrite time before production. Capacity failure stops visibly, never prunes history.
+plus existing file/hour/deadline/DuckDB memory/spill limits. Active SQL paths bound
+snapshot row count/file bytes; DuckDB memory/spill settings separately bound working
+reduction and validation state. They do not use the earlier Python decoded-state
+estimate as a capacity limit; DuckDB's memory limit is not a total-process RSS cap.
+Prepare hosts on disposable local disk and measure
+aggregate staging, validation and large-host rewrite time before production.
+Capacity failure stops visibly, never prunes history.
 
 ### DBT and qualification
 

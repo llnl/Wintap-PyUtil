@@ -368,6 +368,7 @@ def update_entities(
             metadata = entities.metadata(host, hours[0].strftime("%Y-%m-%dT%H:00:00Z"))
             if identity is not None:
                 entities.validate_sql(conn, old, host, None)
+                metadata = entities.sql_metadata(conn, old)
             snapshots[host] = (old, identity, metadata)
             if identity is not None:
                 old_paths.append(old)
