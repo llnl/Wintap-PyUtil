@@ -30,7 +30,9 @@ class CheckoutTests(unittest.TestCase):
             "files": {"source.py": hashlib.sha256(b"source\n").hexdigest()},
         }
 
-    def validate(self, *, head=COMMIT, dirty="", ancestor=0, commit=COMMIT):
+    def validate(
+        self, *, head=COMMIT, dirty="", ancestor=0, commit=COMMIT, committed=b"source\n"
+    ):
         with (
             patch.object(
                 baseline.subprocess, "check_output", side_effect=[head, dirty]
@@ -38,13 +40,59 @@ class CheckoutTests(unittest.TestCase):
             patch.object(
                 baseline.subprocess,
                 "run",
-                return_value=CompletedProcess([], ancestor),
+                side_effect=[
+                    CompletedProcess([], ancestor),
+                    CompletedProcess([], 1 if committed is None else 0, committed),
+                ],
             ),
         ):
             return baseline.validate_checkout(self.root, self.manifest, commit)
 
     def test_committed_revision_passes_not_parent_head(self):
         self.assertEqual(self.validate(), COMMIT)
+
+    def test_matching_local_file_absent_from_commit_refuses(self):
+        with self.assertRaisesRegex(ValueError, "absent from qualification commit"):
+            self.validate(committed=None)
+
+    def test_matching_local_file_with_different_committed_bytes_refuses(self):
+        with self.assertRaisesRegex(ValueError, "Committed source/lockfile mismatch"):
+            self.validate(committed=b"different committed source\n")
+
+    def test_ignored_local_lockfile_cannot_fill_missing_committed_file(self):
+        environment = dict(
+            os.environ, GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull
+        )
+
+        def git(*arguments):
+            return subprocess.check_output(
+                ["git", *arguments], cwd=self.root, env=environment, text=True
+            ).strip()
+
+        git("init", "-q", "-b", "main")
+        (self.root / ".gitignore").write_text("uv.lock\n")
+        git("add", "--", "source.py", ".gitignore")
+        git(
+            "-c",
+            "user.name=Synthetic Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "core.hooksPath=" + os.devnull,
+            "commit",
+            "-q",
+            "-m",
+            "Synthetic committed source without lockfile",
+        )
+        commit = git("rev-parse", "HEAD")
+        (self.root / "uv.lock").write_bytes(b"synthetic reviewed lock\n")
+        self.manifest["baseline_parent_commit"] = commit
+        self.manifest["files"]["uv.lock"] = hashlib.sha256(
+            b"synthetic reviewed lock\n"
+        ).hexdigest()
+        self.assertEqual(git("status", "--porcelain"), "")
+        with self.assertRaisesRegex(ValueError, "absent from qualification commit"):
+            baseline.validate_checkout(self.root, self.manifest, commit)
 
     def test_obsolete_parent_head_refuses(self):
         with self.assertRaisesRegex(ValueError, "exact qualification commit"):

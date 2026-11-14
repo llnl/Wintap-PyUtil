@@ -316,7 +316,10 @@ uv sync --locked --dev --python 3.12 --project extras/raw-sensor-compact
 ```
 
 The harness requires exact HEAD, a clean tracked tree, the reviewed ancestor and
-unchanged public source/lockfile hashes. It runs nine main and three standalone
+unchanged public source/lockfile hashes in both local files and the qualification
+commit's blobs. An ignored local lockfile cannot fill an incomplete commit. The
+exact reviewed main and standalone `uv.lock` files are tracked; do not regenerate
+them for qualification. It runs nine main and three standalone
 test modules sequentially with private reports, isolated CWD/HOME/temp paths and
 no inherited AWS credentials/profiles. Each stage has a 1,200-second ceiling.
 Ordinary test failure still runs the other runtime; timeout stops the harness
@@ -324,6 +327,10 @@ because descendant shutdown is not certified. Return `summary.json` and sanitize
 failure/skip details; raw reports remain private. This is **offline baseline only**,
 not full-suite reruns, macOS reader-shutdown acceptance, actual-S3 qualification or
 representative resource acceptance. The macOS reader backend/client remain absent.
+
+The original `8ee714c` Mac attempt was blocked by the missing committed main lock
+before either test stage ran. Preserve that result and rerun the corrected full
+commit named in the runbook with a new private report directory.
 
 Local harness controls are separate from the 641/439 runtime regression results:
 `python -B scripts/test_dcc_macos_baseline.py`.

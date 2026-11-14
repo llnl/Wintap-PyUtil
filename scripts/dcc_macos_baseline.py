@@ -72,6 +72,21 @@ def validate_checkout(root, manifest, commit):
             raise ValueError(
                 "Feature source/lockfile mismatch; do not alter the manifest"
             )
+        committed = subprocess.run(
+            ["git", "cat-file", "blob", f"{commit}:{relative.as_posix()}"],
+            cwd=root,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        if committed.returncode:
+            raise ValueError(
+                "Required feature source/lockfile is absent from qualification commit"
+            )
+        if hashlib.sha256(committed.stdout).hexdigest() != expected:
+            raise ValueError(
+                "Committed source/lockfile mismatch; do not alter the manifest"
+            )
     return head
 
 
