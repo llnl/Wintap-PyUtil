@@ -14,6 +14,7 @@ from .engine import (
     validate_counts,
 )
 from .inventory import discover, recheck
+from .phase_evidence import inventory_evidence, migration_evidence
 
 
 class HourError(CompactionError):
@@ -40,6 +41,7 @@ def process_hours(
     process_inventory=None,
     delete_confirm_attempts=5,
     delete_confirm_initial_delay_seconds=1.0,
+    evidence=None,
 ):
     separate_roots(source.dataset, destination.dataset)
     if not plan and (type(target_size_bytes) is not int or target_size_bytes <= 0):
@@ -58,6 +60,7 @@ def process_hours(
         "duckdb_version": "2.0.0",
         "source_root": source.dataset.root,
         "destination_root": destination.dataset.root,
+        "event_types": list(families),
         "hours": [],
         "partitions": [],
         "delete_source": delete_source,
@@ -80,12 +83,14 @@ def process_hours(
             )
             if process_inventory is not None and event == "raw_process":
                 expected = {
-                    leaf: files for leaf, files in process_inventory.groups.items()
+                    leaf: files
+                    for leaf, files in process_inventory.groups.items()
                     if leaf.day == parent.day and leaf.hour == parent.hour
                 }
                 if inputs.groups != expected:
                     raise CompactionError(
-                        "Process inputs differ from published entity evidence; no deletion"
+                        "Process inputs differ from published entity evidence; "
+                        "no deletion"
                     )
             if not inputs.groups:
                 report["hours"].append({**parent.as_dict(), "status": "empty"})
@@ -118,6 +123,29 @@ def process_hours(
                         {**parent.as_dict(), "status": "skipped_existing"}
                     )
                     continue
+                original = None
+                if evidence:
+                    phase = "migration_intent"
+                    original = inventory_evidence(source, inputs)
+                    evidence.append(
+                        "migration_intent",
+                        {
+                            "parent": parent.as_dict(),
+                            "source": original,
+                            "partitions": [
+                                {
+                                    **leaf.as_dict(),
+                                    "schema": columns[leaf],
+                                    "source_rows": count_rows(
+                                        conn, [f.uri for f in files]
+                                    ),
+                                }
+                                for leaf, files in sorted(inputs.groups.items())
+                            ],
+                        },
+                    )
+                    recheck(source, inputs, (hour,), max_files=limits.max_files)
+                    phase = "merge"
                 if not destination.dataset.bucket:
                     try:
                         Path(destination_hour).mkdir(parents=True)
@@ -161,11 +189,26 @@ def process_hours(
                     )
                 recheck(source, inputs, (hour,), max_files=limits.max_files)
                 recheck(destination, observed, (hour,), max_files=limits.max_files)
+                migration = None
+                if evidence:
+                    phase = "migration_verified"
+                    migration = migration_evidence(
+                        source, destination, inputs, observed, results, parent
+                    )
+                    if migration["source"] != original:
+                        raise CompactionError(
+                            "Original migration source identity changed; no deletion"
+                        )
+                    evidence.append("migration_verified", migration)
+                    recheck(source, inputs, (hour,), max_files=limits.max_files)
+                    recheck(destination, observed, (hour,), max_files=limits.max_files)
                 report["partitions"].extend(results)
                 hour_report = {**parent.as_dict(), "status": "merged"}
                 report["hours"].append(hour_report)
                 if delete_source:
-                    pending_deletes.append((parent, hour_report))
+                    pending_deletes.append(
+                        (parent, hour_report, inputs, observed, migration)
+                    )
             except Exception as error:
                 message = (
                     str(error)
@@ -181,7 +224,29 @@ def process_hours(
         # Deletion is deliberately a second phase: one stale post-delete listing
         # must not prevent the remaining event families in this hour from being
         # compacted and validated.
-        for parent, hour_report in pending_deletes:
+        for parent, hour_report, inputs, observed, migration in pending_deletes:
+            if evidence:
+                recheck(source, inputs, (hour,), max_files=limits.max_files)
+                recheck(destination, observed, (hour,), max_files=limits.max_files)
+                if (
+                    inventory_evidence(source, inputs) != migration["source"]
+                    or inventory_evidence(destination, observed)
+                    != migration["destination"]
+                ):
+                    raise CompactionError(
+                        "Migration identities changed before deletion"
+                    )
+                evidence.append("deletion_intent", {"parent": parent.as_dict()})
+                recheck(source, inputs, (hour,), max_files=limits.max_files)
+                recheck(destination, observed, (hour,), max_files=limits.max_files)
+                if (
+                    inventory_evidence(source, inputs) != migration["source"]
+                    or inventory_evidence(destination, observed)
+                    != migration["destination"]
+                ):
+                    raise CompactionError(
+                        "Migration bytes changed during deletion intent"
+                    )
             try:
                 if (
                     delete_confirm_attempts == 5
@@ -198,6 +263,8 @@ def process_hours(
                         confirm_initial_delay_seconds=delete_confirm_initial_delay_seconds,
                     )
                 hour_report["source_deleted_objects"] = deleted
+                if evidence:
+                    evidence.append("deletion_verified", hour_report)
             except DeletionError as error:
                 hour_report["status"] = "merged_with_deletion_error"
                 hour_report["deletion_error"] = {
@@ -207,6 +274,8 @@ def process_hours(
                 report["deletion_failures"].append(
                     {**parent.as_dict(), **hour_report["deletion_error"]}
                 )
+                if evidence:
+                    evidence.append("deletion_uncertain", hour_report)
     statuses = {h["status"] for h in report["hours"]}
     report["status"] = (
         "planned"
@@ -235,6 +304,7 @@ def reconcile_deletions(
     now=None,
     delete_confirm_attempts=5,
     delete_confirm_initial_delay_seconds=1.0,
+    evidence=None,
 ):
     """Validate existing outputs and explicitly delete their matching inputs."""
     if not confirm_delete:
@@ -254,6 +324,9 @@ def reconcile_deletions(
         "command": "reconcile-delete",
         "source_root": source.dataset.root,
         "destination_root": destination.dataset.root,
+        "event_types": list(families),
+        "delete_source": True,
+        "partitions": [],
         "hours": [],
         "deletion_failures": [],
     }
@@ -285,6 +358,17 @@ def reconcile_deletions(
                     [f.uri for f in destination_inventory.groups.get(leaf, ())],
                 )
                 checks.append({**leaf.as_dict(), **check.as_dict()})
+                if evidence:
+                    columns = schema(
+                        conn, [f.uri for f in source_inventory.groups.get(leaf, ())]
+                    )
+                    output_columns = schema(
+                        conn,
+                        [f.uri for f in destination_inventory.groups.get(leaf, ())],
+                    )
+                    if columns != output_columns:
+                        checks[-1]["passed"] = False
+                    checks[-1]["schema"] = columns
             item["partitions"] = checks
             if not checks or not all(check["passed"] for check in checks):
                 item["status"] = "blocked_validation"
@@ -297,6 +381,40 @@ def reconcile_deletions(
                 (hour,),
                 max_files=limits.max_files,
             )
+            if evidence:
+                migration = migration_evidence(
+                    source,
+                    destination,
+                    source_inventory,
+                    destination_inventory,
+                    checks,
+                    parent,
+                )
+                evidence.append("migration_verified", migration)
+                recheck(source, source_inventory, (hour,), max_files=limits.max_files)
+                recheck(
+                    destination,
+                    destination_inventory,
+                    (hour,),
+                    max_files=limits.max_files,
+                )
+                evidence.append("deletion_intent", {"parent": parent.as_dict()})
+                recheck(source, source_inventory, (hour,), max_files=limits.max_files)
+                recheck(
+                    destination,
+                    destination_inventory,
+                    (hour,),
+                    max_files=limits.max_files,
+                )
+                if (
+                    inventory_evidence(source, source_inventory) != migration["source"]
+                    or inventory_evidence(destination, destination_inventory)
+                    != migration["destination"]
+                ):
+                    raise CompactionError(
+                        "Migration bytes changed during deletion intent"
+                    )
+            report["partitions"].extend(checks)
             try:
                 item["source_deleted_objects"] = delete_hour(
                     source,
@@ -305,16 +423,18 @@ def reconcile_deletions(
                     confirm_initial_delay_seconds=delete_confirm_initial_delay_seconds,
                 )
                 item["status"] = "deleted"
+                if evidence:
+                    evidence.append("deletion_verified", item)
             except DeletionError as error:
                 item["status"] = "deletion_error"
                 item["deletion_error"] = {"message": str(error), **error.details}
                 report["deletion_failures"].append(
                     {**parent.as_dict(), **item["deletion_error"]}
                 )
+                if evidence:
+                    evidence.append("deletion_uncertain", item)
             report["hours"].append(item)
     report["status"] = (
-        "completed_with_deletion_errors"
-        if report["deletion_failures"]
-        else "completed"
+        "completed_with_deletion_errors" if report["deletion_failures"] else "completed"
     )
     return report

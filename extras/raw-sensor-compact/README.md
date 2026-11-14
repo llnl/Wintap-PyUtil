@@ -218,6 +218,7 @@ changed host is rewritten, which also compacts entity evidence:
 
 ```text
 <dataset>/process_entities/hostPK=<sha256 of trimmed uppercase hostname>/entities.parquet
+<dataset>/process_entities/_authority/authority.parquet
 <dataset>/processing_metrics/dayPK=YYYYMMDD/hourPK=HH/metrics.parquet
 ```
 
@@ -241,9 +242,28 @@ entire update/build. There is no conditional PUT or multi-host transaction. No
 TTL or GC is applied: exited ancestors remain available. Failed publication may
 leave some hosts advanced; replay is safe and no raw deletion starts on failure.
 
+The version-1 Parquet authority journal retains every committed generation and
+its publication intent. Its binding fixes the canonical raw, compacted, entity and
+active metrics roots, namespace, expected host set and identity policy/ceiling.
+Receipts bind original per-host bootstrap declarations, before/after snapshot byte
+identities, current semantic identities, window and original input fingerprint.
+Generation IDs checksum these fields and link to their predecessor. Semantic
+hashing uses named-struct JSON row hashes grouped in 1,024-row batches; unnamed
+`row()` JSON differs between the two DuckDB pins and is not an interchange contract.
+
+Before replacing any host, the writer publishes/GET-verifies a `pending` journal
+intent. It marks that generation `committed` only after every recorded after
+candidate and the input rechecks pass. Ordinary verification/DBT rejects pending
+intent. Under exclusive maintenance, replay (or explicit `--resume-init` for
+partial initialization) accepts only the intent's exact before/after candidates,
+unchanged roots/window/input evidence and reproducible recorded after candidates.
+Changed inputs or an arbitrary valid replacement require operator recovery; replay
+cannot silently adopt them. Uncertain authority PUT acknowledgments remain errors.
+
 The sibling `processing_metrics/` root is maintained automatically whenever an
-entity-enabled `compact`, `entities-init`, or `entities-replay` command succeeds.
-It contains one verified Parquet checkpoint per requested UTC hour. The checkpoint
+entity-enabled `compact`, `reconcile-delete`, `entities-init`, or `entities-replay`
+command reaches checkpoint publication.
+It contains one verified version-4 Parquet checkpoint per requested UTC hour. The checkpoint
 records entity namespace/host counts, snapshot identities, process input/output
 fingerprints, row/file/byte totals, deletion status and operation status. DBT uses
 these records to reject an entity snapshot that has not processed the `raw_process`
@@ -251,6 +271,11 @@ hours in its requested window. The metrics root can be overridden with
 `--processing-metrics-root`, but it must remain separate from raw, compacted and
 entity roots. A metrics-configured invocation without an entity root is rejected
 rather than allowing raw-only processing to masquerade as durable-state maintenance.
+Each checkpoint names its committed generation and must match that generation's
+original hash/provenance/input evidence, not today's evolving aggregate hash.
+Current-window producer evidence may still arrive before maintenance: coverage is
+not equality with the live raw inventory. Coverage is **not** raw-migration success
+evidence; replay can overwrite it and final publication can fail after deletion.
 
 Unknown process identities are rejected by default. With the explicit
 `--unknown-identity-policy quarantine` option, raw rows with an unknown hash,
@@ -290,8 +315,10 @@ Use the same roots, hosts, namespace and window flags with:
 | `compact --target-size-bytes 134217728 [--delete-source]` | Publish/GET-verify entity snapshots, then existing raw compaction. Process inventories are bound across phases; input drift prevents deletion. |
 | `plan` | Read-only entity preparation plus raw plan; requires initialized hosts, publishes nothing. |
 | `entities-replay` | Explicit late/historical window from both archives; no raw writes or deletion. |
-| `entities-verify` | Validate every expected snapshot's schema, metadata, evidence and resolved fields. |
+| `entities-verify` | Validate every expected snapshot and its committed current-state authority/lineage. |
 | `verify` | Raw counts; with entity flags also verifies snapshots. |
+| `reconcile-delete --confirm-delete` | Validate surviving source/output copies, explicitly delete the source and publish entity-enabled coverage. Already-deleted/skipped outcomes are not migration certification. |
+| `checkpoints-repair --confirm-repair --repair-run-id <original-id>` | Under external exclusion, verify an original local run archive and republish its original checkpoint candidates, without entity replay/publication. |
 
 Expected hosts/identity namespace are explicit. New undeclared hosts and missing
 expected snapshots fail closed; never silently recreate deleted history. Rebuild
@@ -299,6 +326,17 @@ corrected/corrupt state with `entities-init` into a **new root**, verify, then
 explicitly switch worker/DBT configuration. Incremental replay adds evidence; it
 cannot retract facts from superseded input. Retained compacted archives are the
 recovery source after small raw files are deleted.
+
+**Explicit legacy upgrade/cutover:** state without the authority journal and
+version-4 coverage is rejected. Under operator exclusion, initialize a **fresh
+entity root and fresh metrics root** from sufficiently retained raw/compacted
+archives, run `entities-verify` and DBT preflight against both new roots, then
+explicitly switch reader/worker configuration together. Keep the old state,
+checkpoints and archive evidence. Never seed authority from an arbitrary existing
+snapshot, and do not claim equivalent ancestry if required archive history is
+missing. Restoring the entire authority journal together with snapshots requires
+an independent ledger/operator high-water mark to detect; this worker cannot
+detect a self-consistent rollback of the whole authority store.
 
 Existing raw destinations still skip and **never** authorize source deletion.
 Entity replay independently revisits skipped/compacted hours but does not reconcile
@@ -308,6 +346,70 @@ Do not continue with raw-only compaction after an entity update failure. Retain 
 source hour, alert, and retry or perform an explicit rebuild/replay; otherwise the
 processing metrics table will correctly leave a coverage hole and DBT will fail
 closed.
+
+### Independent run evidence and checkpoint repair
+
+For opt-in coordinated evidence, add `--run-id` (32 lowercase hexadecimal characters),
+`--coordinator-run-id` (the independent coordinator identity) and
+`--run-evidence-directory /path/to/run-evidence`. A coordinator identity requires
+the archive. The directory is **server-local and separate from all data roots**;
+it is not a fifth S3 dataset and not the authoritative coordination ledger.
+Reports/errors expose both IDs and the archive head/record count. Without supplied
+IDs the CLI generates its own ID; manual runs without an archive remain supported
+but cannot certify coordinated migration merely by returning zero.
+
+Each `<run-evidence-directory>/<run-id>/` contains immutable, predecessor-linked,
+checksummed JSON phase records: effective root/window/host/policy/event intent,
+entity intent/verified generation, original Parquet file identities/counts/schemas,
+verified migration, deletion intent/outcome, raw outcome, original checkpoint
+candidates and verified publications. Records are exclusively linked into place;
+files, new directory links and directory entries are fsynced before advancing.
+Run-ID reuse, symlinks, malformed lineage and exhausted archive budgets fail rather
+than overwriting/pruning history. Limits are 64 MiB/record, 256 MiB/run and 10,000
+records. Object hashes stream in 1 MiB chunks under the command deadline.
+
+`phase_evidence.migration_complete` concerns the **raw** phase only. Skipped,
+mixed skipped/processed, already-deleted or uncertain outcomes are false;
+entity-only replay is false. Verified empty event-hours may accompany merged hours.
+A terminal `complete`/exit zero alone is not permission to reopen readers. The
+future coordinator must also verify entity and final checkpoint evidence and
+commit its own ledger receipt/cursor under exclusivity. Uncertain writes remain
+blocked. Sensor uploads are not frozen by this cooperative exclusion.
+
+After excluding every reader/writer, supply the same roots, hosts, namespace,
+identity policy/ceiling, event selection and original UTC window to:
+
+```sh
+raw-sensor-compact checkpoints-repair \
+  --source-root /path/to/dataset/raw_sensor \
+  --destination-root /path/to/dataset/compacted \
+  --process-entity-root /path/to/entities --entity-host SYNTHETIC-HOST \
+  --entity-namespace synthetic-pid-v2 \
+  --start-hour 2026-01-01T00:00:00Z --end-hour 2026-01-01T01:00:00Z \
+  --run-evidence-directory /path/to/run-evidence \
+  --repair-run-id aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --confirm-repair
+```
+
+IDs/host labels above are synthetic placeholders. Confirmation acknowledges
+**external exclusion**; this command does not acquire a coordinator grant/lock or
+reopen/recreate a ledger. It verifies original migration scope, surviving output
+byte identities and per-protocol SQL counts/schemas, source absence (or unchanged
+retained source), current snapshot/authority integrity and each candidate's
+historical committed receipt. Forward entity evolution is allowed; repair retains
+the original run/generation, never rewrites the original archive, and records
+repair evidence under a new run ID. It rechecks all surviving state and coverage
+before/after publication.
+
+Conflicting coverage, including a newer valid replay checkpoint, is **not** silently
+replaced. `--confirm-replace-checkpoints` explicitly authorizes replacement and
+archives the prior rows in the new repair run. Missing migration/candidate records,
+partial deletion, altered outputs or unresolved entity intent remain blocked;
+checkpoint repair cannot manufacture missing evidence. A crash before original
+checkpoint intent may need separately audited reconciliation or rebuild/cutover,
+not this command alone. Archive retention and independent ledger/operator high-water
+marks are required; checksums are not a substitute for controlling the local archive.
+Linux local fixtures are qualified; actual endpoint/power-loss recovery, non-Linux
+durability and accumulated-state I/O/RSS budgets remain unqualified.
 
 ### Evidence and resource contract
 
@@ -338,6 +440,9 @@ estimate as a capacity limit; DuckDB's memory limit is not a total-process RSS c
 Prepare hosts on disposable local disk and measure
 aggregate staging, validation and large-host rewrite time before production.
 Capacity failure stops visibly, never prunes history.
+The authority journal shares the configured byte cap and retains all generations;
+its historical rows remain SQL-owned. Journal rewrite and steady-state accumulated
+snapshot budgets still need realistic operational qualification.
 
 ### DBT and qualification
 

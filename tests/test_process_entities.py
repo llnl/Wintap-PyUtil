@@ -100,7 +100,7 @@ def test_missing_or_wrong_namespace_state_fails_preflight(env, tmp_path):
     result = operation(env, tmp_path)
     assert result.returncode != 0 and "metadata/namespace/host mismatch" in result.stdout + result.stderr
     env["WINTAP_DBT_PROCESS_ENTITY_NAMESPACE"] = "test-pid-v2"
-    snapshot = next((tmp_path / "input/process_entities").glob("**/*.parquet"))
+    snapshot = next((tmp_path / "input/process_entities").glob("hostPK=*/entities.parquet"))
     snapshot.unlink()
     assert operation(env, tmp_path).returncode != 0
 

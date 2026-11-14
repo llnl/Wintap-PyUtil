@@ -265,12 +265,14 @@ def state_hash(conn, host, path=None):
     params = [] if path is None else [str(path)]
     where = "WHERE hostname=?"
     params.append(host)
-    columns = ",".join(SCHEMA)
+    columns = ",".join(f"{name} := {name}" for name in SCHEMA)
     return conn.execute(
-        "SELECT sha256(coalesce(string_agg(to_json(row("
-        + columns
-        + ")), '\\n' ORDER BY pid_hash), '')) "
-        f"FROM {relation} {where}",
+        f"WITH hashed AS (SELECT row_number() OVER (ORDER BY pid_hash)-1 ordinal, "
+        f"sha256(to_json(struct_pack({columns}))) row_hash FROM {relation} {where}), "
+        "chunks AS (SELECT ordinal//1024 chunk, "
+        "sha256(string_agg(row_hash, '\\n' ORDER BY ordinal)) chunk_hash "
+        "FROM hashed GROUP BY chunk) "
+        "SELECT sha256(coalesce(string_agg(chunk_hash, '\\n' ORDER BY chunk), '')) FROM chunks",
         params,
     ).fetchone()[0]
 

@@ -1,7 +1,13 @@
-{# Create the DuckDB S3 secret when raw_sensor input is read from S3. #}
+{# Create the DuckDB S3 secret only when at least one active input is remote. #}
 {% macro configure_raw_sensor_access() -%}
-    {%- set raw_sensor_dataset = var('raw_sensor_dataset') -%}
-    {%- if not execute or not (raw_sensor_dataset.startswith('s3://') or compacted_root_path().startswith('s3://') or env_var('WINTAP_DBT_PROCESS_ENTITY_ROOT', '').startswith('s3://') or env_var('WINTAP_DBT_PROCESSING_METRICS_ROOT', '').startswith('s3://')) -%}
+    {%- if not execute -%}
+        {{ return('') }}
+    {%- endif -%}
+    {%- set routing = namespace(remote=false) -%}
+    {%- for root in active_input_roots() -%}
+        {%- if root.startswith('s3://') -%}{%- set routing.remote = true -%}{%- endif -%}
+    {%- endfor -%}
+    {%- if not routing.remote -%}
         {{ return('') }}
     {%- endif -%}
 

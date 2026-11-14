@@ -267,25 +267,29 @@ def test_empty_initialized_host_stays_sql_backed(conn, stores, monkeypatch, caps
     assert not report["hosts"][0]["changed"]
 
 
-def test_empty_parent_evidence_is_missing_not_pruned(conn, stores, capsys):
+def test_empty_parent_evidence_is_missing_not_pruned(conn, stores, capsys, monkeypatch):
     source, compacted, entities = stores
     seed(conn, source)
-    update_entities(conn, source, compacted, entities, HOURS, ["HOST"], initialize=True)
-    target = Path(entities.store.dataset.root) / entities.relative("HOST")
-    payload = json.loads(
+    build = entities.build_sql_state
+
+    def empty_parent_candidate(conn, paths=()):
+        build(conn, paths)
+        payload = json.loads(
+            conn.execute("select evidence_json from entity_state").fetchone()[0]
+        )
+        payload["parents"] = []
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         conn.execute(
-            "select evidence_json from read_parquet(?)", [str(target)]
-        ).fetchone()[0]
-    )
-    payload["parents"] = []
-    # Keep canonical serialization: this test is not a JSON-reformatting replay.
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    rewrite(
-        conn,
-        entities,
-        "update corrupt set parent_pid_hash=null, parent_os_pid=null, "
-        "parent_status='missing', evidence_json=" + quote(encoded),
-    )
+            "update entity_state set parent_pid_hash=null, parent_os_pid=null, "
+            "parent_status='missing', evidence_json=?",
+            [encoded],
+        )
+
+    # Construct a valid publication candidate, rather than bypassing current-state
+    # authority by manually replacing an already committed live snapshot.
+    monkeypatch.setattr(entities, "build_sql_state", empty_parent_candidate)
+    update_entities(conn, source, compacted, entities, HOURS, ["HOST"], initialize=True)
+    monkeypatch.setattr(entities, "build_sql_state", build)
     assert verify(source, compacted, entities) == 0
     assert json.loads(capsys.readouterr().out)["hosts"][0]["rows"] == 1
     later = hour_window("2026-01-01T01:00:00Z", "2026-01-01T02:00:00Z")

@@ -52,9 +52,12 @@ class EntityStore:
 
     def read(self, host, path):
         """Return content identity, or None only for an exact absent object."""
+        return self.read_object(self.relative(host), path)
+
+    def read_object(self, relative, path):
+        """Bounded exact-object GET shared by snapshots and their authority journal."""
         self.store.check_deadline()
         dataset = self.store.dataset
-        relative = self.relative(host)
         if dataset.bucket:
             try:
                 response = self.store.client.get_object(
@@ -93,9 +96,11 @@ class EntityStore:
         return digest(path)
 
     def publish(self, host, candidate):
+        self.publish_object(self.relative(host), candidate)
+
+    def publish_object(self, relative, candidate):
         self.store.check_deadline()
         dataset = self.store.dataset
-        relative = self.relative(host)
         if dataset.bucket:
             # One complete PUT; no conditional-write assumption or remote temp keys.
             with open(candidate, "rb") as stream:
@@ -106,7 +111,9 @@ class EntityStore:
             target = Path(dataset.root) / relative
             if any(p.is_symlink() for p in (target, *target.parents)):
                 raise CompactionError("Symlinked entity paths unsupported")
-            target.parent.mkdir(parents=True, exist_ok=True)
+            from .phase_evidence import durable_mkdir
+
+            durable_mkdir(target.parent)
             # Candidate and live root can be on different filesystems.
             from tempfile import NamedTemporaryFile
 
@@ -122,6 +129,13 @@ class EntityStore:
                     output.flush()
                     os.fsync(output.fileno())
                 os.replace(staging, target)
+                # Intent durability includes the directory entry, not only file
+                # contents. Do not start host replacement on an unflushed rename.
+                descriptor = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
             finally:
                 if staging and os.path.exists(staging):
                     os.unlink(staging)
@@ -302,9 +316,11 @@ def update_entities(
     resume_init=False,
     identity_policy="reject",
     identity_max_ratio=DEFAULT_IDENTITY_MAX_RATIO,
+    metrics_root=None,
 ):
     """Prepare all hosts, recheck every input, publish/verify; no source deletion."""
     from .entities import load_inputs
+    from .entity_authority import Authority, binding
 
     hosts = tuple(sorted({host_name(h) for h in hosts}))
     if not hosts:
@@ -373,6 +389,27 @@ def update_entities(
             if identity is not None:
                 old_paths.append(old)
 
+        authority = Authority(
+            conn,
+            entities,
+            directory,
+            binding(
+                source,
+                compacted,
+                entities,
+                hosts,
+                identity_policy,
+                identity_max_ratio,
+                metrics_root,
+            ),
+        )
+        identities = {host: value[1] for host, value in snapshots.items()}
+        authority.check(
+            identities,
+            {host: value[2]["bootstrap_start"] for host, value in snapshots.items()},
+            pending=True,
+        )
+
         # The working entity state is a DuckDB relation.  DuckDB owns hash
         # aggregation, spilling and parallel execution; Python retains only
         # snapshot paths and publication metadata.
@@ -409,7 +446,15 @@ def update_entities(
             check = directory / "check.parquet"
             if entities.read(host, check) != identity:
                 raise CompactionError("Entity state changed during preparation")
+        after_hashes = {
+            host: digest(candidate) if changed else identity
+            for host, candidate, identity, changed in prepared
+        }
+        report["generation_id"] = authority.prepare(
+            report, hours, identities, after_hashes
+        )
         if not plan:
+            authority.publish()
             published = []
             try:
                 for host, candidate, _identity, changed in prepared:
@@ -434,4 +479,15 @@ def update_entities(
                 ) from None
         for store, inventory in zip((source, compacted), inventories, strict=False):
             recheck_entity_inputs(store, inventory, hours, max_files)
+        if not plan:
+            for host in hosts:
+                if (
+                    entities.read(host, directory / "final-check.parquet")
+                    != after_hashes[host]
+                ):
+                    raise CompactionError(
+                        "Entity authority after candidate changed; "
+                        "exclusive recovery required"
+                    )
+            authority.publish(commit=True)
     return report, inventories[0]

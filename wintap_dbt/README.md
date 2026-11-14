@@ -27,6 +27,28 @@ stored parent scalars, missing processing metrics, or uncovered `raw_process` ho
 fail preflight. No automatic empty-state fallback. The metrics root defaults to the
 `processing_metrics` sibling of `WINTAP_DBT_RAW_SENSOR_DATASET`.
 
+Preflight also requires the entity root's version-1 Parquet generation journal
+(`_authority/authority.parquet`) and version-4 hourly coverage. It verifies the
+unbroken committed receipt chain, all effective roots/expected hosts/policy and
+original per-host bootstrap declarations, then compares the current snapshots to
+the latest aggregate semantic identities. Historical checkpoints match their own
+committed generation, not today's hash. Pending publication intent, rollback with
+retained authority, arbitrary replacement and altered receipt/coverage evidence
+fail closed. Existing current-window evidence is still read before maintenance
+catches up; coverage is not a fingerprint comparison with the live raw inventory.
+
+Legacy state needs an explicit fresh entity **and metrics** root rebuild and paired
+configuration cutover under operator exclusion; preserve the old evidence. See the
+manager's [upgrade/recovery contract](../extras/raw-sensor-compact/README.md#bootstrap-and-hourly-operation).
+These receipts do not certify raw deletion or detect self-consistent rollback of
+the entire authority store without an independent ledger/operator high-water mark.
+For checkpoint failure after deletion, the standalone worker's opt-in local run
+archive retains original migration evidence independently of coverage. Exclusive
+`checkpoints-repair` verifies that archive and surviving data, then republishes the
+original historical-generation candidates without entity replay. It does not
+reopen a coordination ledger; missing evidence remains blocked. See
+[independent evidence and repair](../extras/raw-sensor-compact/README.md#independent-run-evidence-and-checkpoint-repair).
+
 `WINTAP_DBT_PROCESS_UNKNOWN_IDENTITY_POLICY` defaults to `reject` and must match
 the writer policy recorded in every checkpoint. `quarantine` is an explicit
 exception: unknown-identity raw evidence remains available to bronze/raw QA but
@@ -101,6 +123,12 @@ You can still export any of those variables to override the defaults. DBT itself
 For split I/O, keep `WINTAP_DBT_DATABASE` local and point `WINTAP_DBT_RAW_SENSOR_DATASET` at the parquet dataset root that contains `raw_sensor/`. If that raw dataset lives on S3, the dbt DuckDB profile now loads `httpfs` and configures an S3 secret from the usual AWS environment variables. Set `AWS_PROFILE` to select a named shared AWS profile; DBT passes it explicitly to DuckDB's credential-chain secret. DuckDB does not copy a profile's custom `endpoint_url` into the secret, so Garage/path-style users must also set `AWS_ENDPOINT_URL`, `AWS_DEFAULT_REGION` or `AWS_REGION`, and `DUCKDB_USE_SSL` to match that endpoint.
 
 Date discovery uses **both effective local input roots**, not the output root.
+S3 setup considers raw, compacted, entity and **active** processing-metrics roots.
+With an empty entity root, metrics are not an input: even an inherited remote
+metrics override is ignored by offline validation and DBT access setup. Ordinary
+local-only `make dbt-build` remains direct, without AWS credentials, coordination,
+a compacted directory, compactor installation or entity initialization. When
+entity mode is enabled, an empty metrics override uses the default sibling root.
 S3 input requires explicit `WINTAP_DBT_START_DAY` and `WINTAP_DBT_END_DAY`.
 No local `raw_sensor/` placeholder or downloaded copy is required for S3:
 

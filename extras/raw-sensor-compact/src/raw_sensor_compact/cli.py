@@ -13,6 +13,14 @@ from .engine import connection, validate_counts
 from .entities import DEFAULT_IDENTITY_MAX_RATIO, EntityLimits, host_name
 from .entity_store import EntityStore, entity_inventory, update_entities
 from .inventory import Store, discover, recheck
+from .phase_evidence import (
+    RunEvidence,
+    load_archive,
+    local_directory,
+    migration_complete,
+    run_identity,
+    verify_migrations,
+)
 from .processing_metrics import ProcessingMetricsStore, metric_rows
 from .storage import S3Settings, open_s3
 
@@ -28,6 +36,7 @@ def parser() -> argparse.ArgumentParser:
         "entities-init",
         "entities-replay",
         "entities-verify",
+        "checkpoints-repair",
     ):
         command = commands.add_parser(name)
         command.add_argument(
@@ -80,6 +89,28 @@ def parser() -> argparse.ArgumentParser:
             )
         command.add_argument("--start-hour", required=True)
         command.add_argument("--end-hour", required=True)
+        command.add_argument(
+            "--run-id", help="Stable 32-character lowercase hex CLI identity"
+        )
+        command.add_argument(
+            "--coordinator-run-id", help="Independent coordinator run identity"
+        )
+        command.add_argument(
+            "--run-evidence-directory",
+            help="Separate server-local immutable run archive",
+        )
+        if name == "checkpoints-repair":
+            command.add_argument("--repair-run-id", required=True)
+            command.add_argument(
+                "--confirm-repair",
+                action="store_true",
+                help="Confirm all readers/writers are excluded for repair",
+            )
+            command.add_argument(
+                "--confirm-replace-checkpoints",
+                action="store_true",
+                help="Explicitly replace conflicting coverage; archive its disposition",
+            )
         command.add_argument("--event-type", action="append", default=[])
         command.add_argument("--profile")
         command.add_argument("--region")
@@ -132,6 +163,104 @@ def parser() -> argparse.ArgumentParser:
 
 
 def run(args) -> tuple[dict, int]:
+    run_id = run_identity(getattr(args, "run_id", None) or uuid.uuid4().hex)
+    coordinator_id = getattr(args, "coordinator_run_id", None) or ""
+    if coordinator_id:
+        run_identity(coordinator_id)
+        if not getattr(args, "run_evidence_directory", None):
+            raise CompactionError("Coordinated runs require --run-evidence-directory")
+    state = {}
+    try:
+        report, code = _run(args, run_id, coordinator_id, state)
+        archive = state.get("archive")
+        if archive:
+            archive.append(
+                "complete" if code == 0 else "blocked",
+                {
+                    "status": report.get("status", ""),
+                    "exit_code": code,
+                    "migration_complete": archive.migration_complete,
+                },
+            )
+            report["phase_evidence"] = archive.summary()
+        else:
+            report["phase_evidence"] = {"migration_complete": False, "archived": False}
+        report.update(run_id=run_id, coordinator_run_id=coordinator_id)
+        return report, code
+    except Exception as error:
+        archive = state.get("archive")
+        if archive:
+            try:
+                archive.append(
+                    "blocked",
+                    {
+                        "message": str(error)
+                        if isinstance(error, CompactionError)
+                        else "Operation failed; details suppressed"
+                    },
+                )
+            except CompactionError:
+                pass  # Archiving failure cannot clear the original uncertainty.
+        if not isinstance(error, CompactionError):
+            error = CompactionError("Operation failed; details suppressed")
+        error.run_id = run_id
+        error.coordinator_run_id = coordinator_id
+        error.phase_evidence = (
+            archive.summary() if archive else {"migration_complete": False}
+        )
+        raise error
+
+
+def _verify_entity_state(conn, source, merged, entities, args, metrics_root):
+    from pathlib import Path
+    from tempfile import TemporaryDirectory
+
+    from .entity_authority import Authority, binding
+
+    report = {"status": "passed", "hosts": []}
+    with TemporaryDirectory(prefix="entity-verify-") as directory:
+        identities, bootstraps = {}, {}
+        for host in sorted({host_name(h) for h in args.entity_host}):
+            path = Path(directory) / "snapshot.parquet"
+            snapshot_identity = entities.read(host, path)
+            if snapshot_identity is None:
+                raise CompactionError("Expected entity snapshot missing")
+            entities.validate_sql(conn, path, host, None)
+            metadata = entities.sql_metadata(conn, path)
+            identities[host] = snapshot_identity
+            bootstraps[host] = metadata["bootstrap_start"]
+            rows = conn.execute(
+                "SELECT count(*) FROM read_parquet(?)", [str(path)]
+            ).fetchone()[0]
+            report["hosts"].append(
+                {
+                    "hostname": host,
+                    "rows": rows,
+                    "metadata": metadata,
+                    "snapshot_sha256": snapshot_identity,
+                }
+            )
+        authority = Authority(
+            conn,
+            entities,
+            directory,
+            binding(
+                source,
+                merged,
+                entities,
+                identities,
+                args.unknown_identity_policy,
+                args.unknown_identity_max_ratio,
+                metrics_root.root,
+            ),
+        )
+        authority.check(identities, bootstraps)
+        report["generation_id"] = authority.latest["generation_id"]
+        report["authority_sha256"] = authority.identity
+    return report
+
+
+def _run(args, run_id, coordinator_id, state) -> tuple[dict, int]:
     started = monotonic()
     limits = Limits(
         threads=args.threads,
@@ -168,6 +297,15 @@ def run(args) -> tuple[dict, int]:
     )
     if args.command.startswith("entities-") and entity_root is None:
         raise CompactionError("Entity commands require --process-entity-root")
+    if args.command == "checkpoints-repair" and (
+        entity_root is None
+        or not getattr(args, "run_evidence_directory", None)
+        or not getattr(args, "confirm_repair", False)
+    ):
+        raise CompactionError(
+            "Checkpoint repair requires entity mode, original run evidence "
+            "and explicit --confirm-repair"
+        )
     if args.processing_metrics_root and entity_root is None:
         raise CompactionError(
             "Processing metrics require --process-entity-root; do not run raw-only mode"
@@ -191,6 +329,31 @@ def run(args) -> tuple[dict, int]:
         separate_roots(source, metrics_root)
         separate_roots(destination, metrics_root)
         separate_roots(entity_root, metrics_root)
+    archive = None
+    evidence_binding = {
+        "raw_root": source.root,
+        "compacted_root": destination.root,
+        "entity_root": entity_root.root if entity_root else "",
+        "metrics_root": metrics_root.root if metrics_root else "",
+        "namespace": args.entity_namespace or "",
+        "hosts": sorted({host_name(h) for h in args.entity_host})
+        if entity_root
+        else [],
+        "identity_policy": args.unknown_identity_policy,
+        "identity_max_ratio": float(args.unknown_identity_max_ratio),
+        "window_start": args.start_hour,
+        "window_end": args.end_hour,
+        "event_types": sorted(set(events)),
+    }
+    if getattr(args, "run_evidence_directory", None):
+        archive_root = Dataset.parse(str(local_directory(args.run_evidence_directory)))
+        for dataset in (source, destination, entity_root, metrics_root):
+            if dataset:
+                separate_roots(archive_root, dataset)
+        archive = RunEvidence(
+            archive_root.root, run_id, coordinator_id, evidence_binding, args.command
+        )
+        state["archive"] = archive
     with connection(limits) as conn:
         client = (
             open_s3(conn, settings)
@@ -210,11 +373,21 @@ def run(args) -> tuple[dict, int]:
             if metrics_root
             else None
         )
-        run_id = uuid.uuid4().hex
 
         def publish_metrics(report, operation):
             if metrics is None or process_inventory is None or args.command == "plan":
                 return
+            current_entities = None
+            if archive:
+                current_entities = _verify_entity_state(
+                    conn, source_store, merged_store, entities, args, metrics_root
+                )
+                if current_entities["generation_id"] != entity_report.get(
+                    "generation_id"
+                ):
+                    raise CompactionError(
+                        "Entity authority changed before checkpoint publication"
+                    )
             compacted_inventory = entity_inventory(
                 merged_store, hours, limits.max_files
             )
@@ -230,13 +403,52 @@ def run(args) -> tuple[dict, int]:
                 operation=operation,
                 completed_at=datetime.now(timezone.utc).isoformat(),
             )
+            if archive:
+                archive.append("checkpoint_intent", {"rows": rows})
             for hour, row in zip(hours, rows, strict=False):
                 metrics.publish(conn, hour, row)
+                if archive:
+                    archive.append(
+                        "checkpoint_verified",
+                        {"hour_start": row["hour_start"], "row": row},
+                    )
+            if archive:
+                if any(
+                    metrics.read(conn, h) != r for h, r in zip(hours, rows, strict=True)
+                ):
+                    raise CompactionError("Checkpoint final GET verification failed")
+                if (
+                    _verify_entity_state(
+                        conn, source_store, merged_store, entities, args, metrics_root
+                    )
+                    != current_entities
+                ):
+                    raise CompactionError(
+                        "Entity authority changed during checkpoint publication"
+                    )
             report["processing_metrics"] = {
                 "root": metrics_root.root,
                 "hours": len(rows),
                 "run_id": run_id,
             }
+
+        def recheck_raw():
+            if archive and archive.migration_complete:
+                verify_migrations(
+                    conn,
+                    load_archive(archive.root.as_posix(), run_id),
+                    source_store,
+                    merged_store,
+                    hours,
+                    events,
+                    limits,
+                )
+
+        def record_raw(report):
+            if archive:
+                archive.append("raw_complete", report)
+                archive.migration_complete = migration_complete(report)
+                recheck_raw()
 
         if entity_root:
             entities = EntityStore(
@@ -244,28 +456,32 @@ def run(args) -> tuple[dict, int]:
                 args.entity_namespace,
                 EntityLimits(args.max_entity_rows, args.max_entity_bytes),
             )
-            if args.command in {"entities-verify", "verify"}:
-                from pathlib import Path
-                from tempfile import TemporaryDirectory
+            if args.command in {"entities-verify", "verify", "checkpoints-repair"}:
 
-                report = {"status": "passed", "hosts": []}
-                with TemporaryDirectory(prefix="entity-verify-") as directory:
-                    for host in args.entity_host:
-                        path = Path(directory) / "snapshot.parquet"
-                        if entities.read(host, path) is None:
-                            raise CompactionError("Expected entity snapshot missing")
-                        entities.validate_sql(conn, path, host, None)
-                        metadata = entities.sql_metadata(conn, path)
-                        rows = conn.execute(
-                            "SELECT count(*) FROM read_parquet(?)", [str(path)]
-                        ).fetchone()[0]
-                        report["hosts"].append(
-                            {
-                                "hostname": host_name(host),
-                                "rows": rows,
-                                "metadata": metadata,
-                            }
-                        )
+                def verify_current_entities():
+                    return _verify_entity_state(
+                        conn, source_store, merged_store, entities, args, metrics_root
+                    )
+
+                report = verify_current_entities()
+                if archive:
+                    archive.append("entities_verified", report)
+                if args.command == "checkpoints-repair":
+                    from .phase_evidence import repair_checkpoints
+
+                    return repair_checkpoints(
+                        conn,
+                        args,
+                        archive,
+                        evidence_binding,
+                        source_store,
+                        merged_store,
+                        metrics,
+                        hours,
+                        events,
+                        limits,
+                        verify_current_entities=verify_current_entities,
+                    ), 0
                 if args.command == "entities-verify":
                     return report, 0
                 entity_report = report
@@ -282,6 +498,8 @@ def run(args) -> tuple[dict, int]:
                             "Source deletion requires closed UTC hours past a "
                             "5–1440 minute grace"
                         )
+                if archive and args.command != "plan":
+                    archive.append("entities_intent", {"operation": args.command})
                 entity_report, process_inventory = update_entities(
                     conn,
                     source_store,
@@ -296,7 +514,10 @@ def run(args) -> tuple[dict, int]:
                     resume_init=getattr(args, "resume_init", False),
                     identity_policy=args.unknown_identity_policy,
                     identity_max_ratio=args.unknown_identity_max_ratio,
+                    metrics_root=metrics_root.root,
                 )
+                if archive and args.command != "plan":
+                    archive.append("entities_verified", entity_report)
                 if args.command.startswith("entities-"):
                     if args.command in {"entities-init", "entities-replay"}:
                         metrics_report = {"hours": [], "partitions": []}
@@ -323,10 +544,14 @@ def run(args) -> tuple[dict, int]:
                 delete_confirm_initial_delay_seconds=getattr(
                     args, "delete_confirm_initial_delay_seconds", 1.0
                 ),
+                evidence=archive if args.command != "plan" else None,
             )
+            if archive and args.command != "plan":
+                record_raw(report)
             if entity_report is not None:
                 report["process_entities"] = entity_report
                 publish_metrics(report, "compact")
+            recheck_raw()
             return (
                 report,
                 2 if report["status"] == "completed_with_deletion_errors" else 0,
@@ -343,7 +568,14 @@ def run(args) -> tuple[dict, int]:
                 grace_minutes=args.grace_minutes,
                 delete_confirm_attempts=args.delete_confirm_attempts,
                 delete_confirm_initial_delay_seconds=args.delete_confirm_initial_delay_seconds,
+                evidence=archive,
             )
+            if archive:
+                record_raw(report)
+            if entity_report is not None:
+                report["process_entities"] = entity_report
+                publish_metrics(report, "reconcile-delete")
+            recheck_raw()
             return (
                 report,
                 2 if report["status"] == "completed_with_deletion_errors" else 0,
@@ -385,6 +617,9 @@ def main(argv=None) -> int:
         return code
     except CompactionError as error:
         report = {"status": "error", "message": str(error)}
+        for field in ("run_id", "coordinator_run_id", "phase_evidence"):
+            if hasattr(error, field):
+                report[field] = getattr(error, field)
         if hasattr(error, "destination_hour"):
             report["destination_hour"] = error.destination_hour
             report["source_hour"] = error.source_hour

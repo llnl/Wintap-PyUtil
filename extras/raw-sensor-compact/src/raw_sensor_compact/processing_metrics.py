@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import math
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -11,7 +12,8 @@ from .config import CompactionError
 from .entities import DEFAULT_IDENTITY_MAX_RATIO
 from .inventory import Inventory, Store
 
-VERSION = "3"
+VERSION = "4"
+MAX_CHECKPOINT_BYTES = 16 * 1024 * 1024
 SCHEMA = {
     "metric_version": "VARCHAR",
     "run_id": "VARCHAR",
@@ -23,6 +25,7 @@ SCHEMA = {
     "hour_end": "VARCHAR",
     "entity_mode": "BOOLEAN",
     "entity_namespace": "VARCHAR",
+    "entity_generation_id": "VARCHAR",
     "expected_host_count": "BIGINT",
     "entity_rows": "BIGINT",
     "entity_changed_hosts": "BIGINT",
@@ -170,7 +173,7 @@ def metric_rows(
             "completed_with_deletion_errors"
             if deletion_failures
             else "merged"
-            if "merged" in statuses
+            if statuses & {"merged", "deleted"}
             else "skipped_existing"
             if "skipped_existing" in statuses
             else "empty"
@@ -196,7 +199,8 @@ def metric_rows(
                 "hour_end": _hour_string(hour + timedelta(hours=1)),
                 "entity_mode": True,
                 "entity_namespace": namespace,
-                "expected_host_count": len(hosts),
+                "entity_generation_id": entity_report.get("generation_id", ""),
+                "expected_host_count": len(entity_hashes),
                 "entity_rows": entity_rows,
                 "entity_changed_hosts": changed_hosts,
                 "entity_parent_conflicts": conflicts,
@@ -242,6 +246,65 @@ def metric_rows(
     return rows
 
 
+def validate_checkpoint_row(row):
+    if not isinstance(row, dict) or row.keys() != SCHEMA.keys():
+        raise CompactionError("Original checkpoint candidate schema mismatch")
+    for name, dtype in SCHEMA.items():
+        value = row[name]
+        valid = (
+            isinstance(value, str)
+            if dtype == "VARCHAR"
+            else type(value) is bool
+            if dtype == "BOOLEAN"
+            else type(value) is int and value >= 0
+            if dtype == "BIGINT"
+            else type(value) in (int, float) and math.isfinite(value) and value >= 0
+        )
+        if not valid:
+            raise CompactionError("Original checkpoint candidate type/value mismatch")
+
+
+def validate_checkpoint_receipts(conn, rows, hours, binding):
+    """Query retained receipts after current snapshot/authority validation."""
+    if len(rows) != len(hours):
+        raise CompactionError("Original checkpoint hour scope mismatch")
+    for row, hour in zip(rows, hours, strict=True):
+        validate_checkpoint_row(row)
+        cursor = conn.execute(
+            "SELECT status, semantic_hashes, bootstrap_starts, input_fingerprint, "
+            "window_start, window_end FROM entity_authority WHERE generation_id=?",
+            [row["entity_generation_id"]],
+        )
+        receipt = cursor.fetchone()
+        if receipt is None or cursor.fetchone() is not None:
+            raise CompactionError(
+                "Original checkpoint historical receipt missing/duplicated"
+            )
+        status, hashes, bootstraps, fingerprint, start, end = receipt
+        if (
+            status != "committed"
+            or row["metric_version"] != VERSION
+            or not row["entity_mode"]
+            or row["entity_namespace"] != binding["namespace"]
+            or row["expected_host_count"] != len(binding["hosts"])
+            or row["entity_snapshot_hashes"]
+            != json.dumps(json.loads(hashes), sort_keys=True)
+            or row["entity_bootstrap_start"] != min(json.loads(bootstraps).values())
+            or row["entity_input_fingerprint"] != fingerprint
+            or row["identity_policy"] != binding["identity_policy"]
+            or row["identity_exclusion_max_ratio"] != binding["identity_max_ratio"]
+            or row["identity_exclusion_ratio"] > row["identity_exclusion_max_ratio"]
+            or row["window_start"] != start
+            or row["window_end"] != end
+            or row["hour_start"] != _hour_string(hour)
+            or row["hour_end"] != _hour_string(hour + timedelta(hours=1))
+            or not start <= row["hour_start"] < row["hour_end"] <= end
+        ):
+            raise CompactionError(
+                "Original checkpoint historical receipt evidence mismatch"
+            )
+
+
 class ProcessingMetricsStore:
     """Fixed per-hour Parquet objects under a processing_metrics root."""
 
@@ -254,6 +317,8 @@ class ProcessingMetricsStore:
         return f"dayPK={day}/hourPK={value}/metrics.parquet"
 
     def _validate(self, conn, path):
+        if path.stat().st_size > MAX_CHECKPOINT_BYTES:
+            raise CompactionError("Processing metrics object exceeds byte budget")
         actual = {
             row[0]: row[1]
             for row in conn.execute(
@@ -271,7 +336,54 @@ class ProcessingMetricsStore:
         ):
             raise CompactionError("Processing metrics object must contain one row")
 
+    def read(self, conn, hour):
+        """Bounded exact-object read for explicit repair; never scan hourly roots."""
+        self.store.check_deadline()
+        relative = self.relative(hour)
+        dataset = self.store.dataset
+        with TemporaryDirectory(prefix="processing-metrics-read-") as directory:
+            path = Path(directory) / "metrics.parquet"
+            if dataset.bucket:
+                try:
+                    response = self.store.client.get_object(
+                        Bucket=dataset.bucket, Key=dataset.object_key(relative)
+                    )
+                except Exception as error:
+                    code = getattr(error, "response", {}).get("Error", {}).get("Code")
+                    if code in {"NoSuchKey", "404", "NotFound"}:
+                        return None
+                    raise CompactionError("Processing metrics GET failed") from None
+                body = response["Body"]
+                try:
+                    with path.open("wb") as output:
+                        size = 0
+                        while chunk := body.read(1024 * 1024):
+                            self.store.check_deadline()
+                            size += len(chunk)
+                            if size > MAX_CHECKPOINT_BYTES:
+                                raise CompactionError(
+                                    "Processing metrics object exceeds byte budget"
+                                )
+                            output.write(chunk)
+                finally:
+                    body.close()
+            else:
+                path = Path(dataset.root) / relative
+                if any(p.is_symlink() for p in (path, *path.parents)):
+                    raise CompactionError(
+                        "Symlinked processing metrics paths unsupported"
+                    )
+                if not path.exists():
+                    return None
+            self._validate(conn, path)
+            values = conn.execute(
+                "SELECT * FROM read_parquet(?, hive_partitioning=false)", [str(path)]
+            ).fetchone()
+            self.store.check_deadline()
+            return dict(zip(SCHEMA, values, strict=True))
+
     def publish(self, conn, hour: datetime, row: dict) -> None:
+        validate_checkpoint_row(row)
         self.store.check_deadline()
         relative = self.relative(hour)
         with TemporaryDirectory(prefix="processing-metrics-") as directory:
@@ -307,7 +419,7 @@ class ProcessingMetricsStore:
                     )
                     body = response["Body"]
                     try:
-                        remote = body.read()
+                        remote = body.read(MAX_CHECKPOINT_BYTES + 1)
                     finally:
                         body.close()
                 except Exception:
@@ -327,7 +439,9 @@ class ProcessingMetricsStore:
                     raise CompactionError(
                         "Symlinked processing metrics paths unsupported"
                     )
-                target.parent.mkdir(parents=True, exist_ok=True)
+                from .phase_evidence import durable_mkdir, fsync_directory
+
+                durable_mkdir(target.parent)
                 staging = None
                 try:
                     with (
@@ -340,6 +454,14 @@ class ProcessingMetricsStore:
                         output.flush()
                         os.fsync(output.fileno())
                     os.replace(staging, target)
+                    fsync_directory(target.parent)
+                    if (
+                        hashlib.sha256(target.read_bytes()).digest()
+                        != hashlib.sha256(candidate.read_bytes()).digest()
+                    ):
+                        raise CompactionError(
+                            "Processing metrics content verification failed"
+                        )
                 finally:
                     if staging and os.path.exists(staging):
                         os.unlink(staging)

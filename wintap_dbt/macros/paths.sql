@@ -18,6 +18,16 @@
     {{ return(var('compacted_root', '').rstrip('/') or raw_sensor_dataset_path() ~ '/compacted') }}
 {%- endmacro %}
 
+{# Resolve active roots before S3 setup; disabled metrics are not an input. #}
+{% macro active_input_roots() -%}
+    {% set roots = [raw_sensor_dataset_path() ~ '/raw_sensor', compacted_root_path()] %}
+    {% set entity = env_var('WINTAP_DBT_PROCESS_ENTITY_ROOT', '').rstrip('/') %}
+    {% if entity %}
+        {% do roots.extend([entity, processing_metrics_root()]) %}
+    {% endif %}
+    {{ return(roots) }}
+{%- endmacro %}
+
 {% macro raw_event_input_paths(event_type) -%}
     {{ return([raw_sensor_path(event_type), compacted_root_path() ~ '/' ~ event_type]) }}
 {%- endmacro %}

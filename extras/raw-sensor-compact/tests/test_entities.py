@@ -276,8 +276,11 @@ class FakeS3:
 
     def put_object(self, Bucket, Key, Body):
         data = Body.read()
-        self.objects[Key] = data if self.fail != "corrupt" else b"broken"
-        if self.fail == "ack":
+        # These existing probes inject snapshot publication failures, not the
+        # earlier authority-intent PUT (which has separate failure-point tests).
+        failure = self.fail if Key.endswith("/entities.parquet") else None
+        self.objects[Key] = data if failure != "corrupt" else b"broken"
+        if failure == "ack":
             raise OSError("lost acknowledgment")
 
 
