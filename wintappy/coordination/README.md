@@ -313,8 +313,8 @@ grace cannot admit new readers; a pre-due reservation delivered across grace rem
 reserved and the dataset drains. Clock rollback/access errors fail rather than
 authorize new work. A post-writer clock failure still records `BLOCKED` using the
 last valid observation before propagating the error. Without `clock=`, the explicit
-`now` remains a fixed observation for compatibility; production clock/CLI wiring
-is not implemented.
+`now` remains a fixed observation for compatibility. The separate Linux service
+wires an evolving clock; it does not change this conservative callback contract.
 
 The review's ingestion/grace defect is repaired by a post-ingestion observation
 before admission. Formal tests cover exact grace and clock faults, preserving
@@ -330,8 +330,11 @@ exit-zero `completed`/`empty` claims, becomes `BLOCKED`, with unchanged cursor.
 Only small status/exit-code/child-stopped summaries are retained as untrusted
 diagnostics, not full worker reports or recovery receipts. Callback failure or
 interruption cannot reopen; abrupt death leaves `WRITING` for blocked restart.
-No adapter leaves due work `DRAINING`. The returned snapshot is advisory; no S3
-`status.json`, operator CLI or periodic scheduling is implemented yet.
+No adapter leaves due work `DRAINING`. The returned snapshot is advisory. This
+describes the library baseline. The subsequent [Linux integration](LINUX.md)
+implements service/client CLIs, advisory local `status.json`, independent completion
+and narrow audited recovery; no S3 status mirror is implemented. Scheduling examples
+exist, but no scheduler installation or production rollout is implied.
 
 The dcc-02 gate remains open until the separate qualified completion path is wired
 into scheduling and service behavior, with its full required regression evidence.
@@ -517,6 +520,11 @@ failure/skip details; raw reports remain private. This is **offline baseline onl
 not full-suite reruns, macOS reader-shutdown acceptance, actual-S3 qualification or
 representative resource acceptance. The macOS reader backend/client remain absent.
 
+The native `scripts/dcc_macos_restriction_probe.py` is feasibility-only. It runs a
+fixed synthetic DBT build/test using deprecated Apple sandbox APIs and private
+CPython tracker/finalizer seams. It is not wired into the supervisor/client,
+does not publish releases and does not qualify interruption or complete shutdown.
+
 The original `8ee714c` Mac attempt was blocked by the missing committed main lock
 before either test stage ran. Preserve that result and rerun the corrected full
 commit named in the runbook with a new private report directory.
@@ -530,7 +538,8 @@ Local harness controls are separate from the 641/439 runtime regression results:
 operation. Supply a new run directory on persistent local disk outside telemetry
 and phase archives; its parent must already exist. It refuses existing directories
 instead of overwriting previous observations. The caller is responsible for the
-directory's exclusion/root binding until the full service adapter is implemented.
+directory's exclusion/root binding. The separate Linux service supplies that
+adapter; direct library callers still own this responsibility.
 
 A fresh main-runtime supervising exec becomes a Linux child subreaper **before**
 launch. It adopts/reaps orphaned and detached descendants, including `setsid` and
@@ -568,8 +577,9 @@ callback-based compactor certification or permission to reopen is added.
 
 The supervisor manifest remains only a command observation, not an effective
 configuration receipt. The separate execution library above supplies the required
-pre-launch binding and negative tests; full service/completion integration remains
-pending. Neither artifact permits reopening by itself.
+pre-launch binding and negative tests, and the separate Linux service integrates
+independent completion. Broader qualification remains pending; neither artifact
+permits reopening by itself.
 
 Tests use real local DuckDB, synthetic messages and fake S3, including abrupt
 `os._exit` failures around COMMIT and WAL recovery and a child surviving abrupt
