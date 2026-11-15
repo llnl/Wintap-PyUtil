@@ -1,9 +1,10 @@
 # Coordination libraries (implementation slices)
 
-The Linux `service` CLI and durable reader wrapper now integrate the existing
-libraries. **Actual S3, representative resources, native-Mac shutdown and partial-run
-recovery remain qualification/implementation gates; do not enable production cron.**
-Read [Linux integration](LINUX.md) for current commands and limits. Library-slice
+The Linux `service` CLI and durable reader wrapper integrate the existing
+libraries. **Actual S3, representative resources, native-Mac DBT/platform acceptance
+and partial-run recovery remain open gates; do not enable production cron.** Read
+[Linux integration](LINUX.md) and [native macOS reader supervision](MACOS.md) for
+platform-specific commands and limits. Library-slice
 history below retains its original scope; references to missing integration describe
 those historical revisions, not the current Linux service.
 Current Linux audited recovery supports operator reader cancellation, fresh

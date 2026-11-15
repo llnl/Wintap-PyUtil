@@ -1,10 +1,11 @@
-"""Linux-only, isolated subreaper supervision; observations are not receipts.
+"""Linux subreaper and best-effort native-Mac process-group supervision.
 
-One fresh exec owns exactly one command tree. Orphaned/double-forked/setsid
-descendants are adopted and reaped by that exec, not the ledger process. ECHILD
-after root exit proves shutdown of this tree; a process group alone cannot do so.
-This is cooperative supervision, not hostile-workload or external-service fencing.
-Uncertain shutdown, worker death or missing durable observations must fail closed.
+Linux uses one fresh exec as an isolated subreaper; ECHILD after root exit proves
+shutdown of that descendant tree. macOS instead accepts an empty dedicated process
+group as a best-effort normal-release signal; descendants that escape the group may
+go unnoticed. This is cooperative supervision, not hostile-workload or
+external-service fencing. Uncertain shutdown, worker death or missing durable
+observations must fail closed.
 """
 
 import ctypes
@@ -14,6 +15,7 @@ import json
 import math
 import os
 import re
+import select
 import selectors
 import signal
 import subprocess
@@ -41,16 +43,15 @@ def _budget(value, ceiling, *, integer=False):
 
 def _config(command, directory, timeout, grace, shutdown, limit, cwd, env):
     if (
-        sys.platform != "linux"
+        sys.platform not in {"linux", "darwin"}
         or threading.current_thread() is not threading.main_thread()
     ):
-        raise CoordinationError("Supervision requires Linux and the main thread")
+        raise CoordinationError("Supervision requires Linux/macOS and the main thread")
     if (
         not isinstance(command, list)
         or not 1 <= len(command) <= 256
         or any(
-            not isinstance(arg, str) or not arg or len(arg) > 4096 or "\0" in arg
-            for arg in command
+            not isinstance(arg, str) or not arg or len(arg) > 4096 or "\0" in arg for arg in command
         )
     ):
         raise CoordinationError("Writer command must be a bounded argument list")
@@ -155,6 +156,8 @@ def run_supervised(
     _fsync_directory(root.parent)
     manifest = _manifest(config)
     _publish(root / "command.json", manifest)
+    if sys.platform == "darwin":
+        return _run_macos_supervised(config, payload, root, manifest)
     worker = None
     control = None
     handlers = {s: signal.getsignal(s) for s in SIGNALS}
@@ -173,10 +176,7 @@ def run_supervised(
         fcntl.fcntl(
             control,
             fcntl.F_ADD_SEALS,
-            fcntl.F_SEAL_WRITE
-            | fcntl.F_SEAL_GROW
-            | fcntl.F_SEAL_SHRINK
-            | fcntl.F_SEAL_SEAL,
+            fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL,
         )
         mask = signal.pthread_sigmask(signal.SIG_BLOCK, SIGNALS)
         try:
@@ -201,9 +201,7 @@ def run_supervised(
         worker.wait(timeout=timeout_seconds + shutdown_seconds + 10)
         if worker.returncode != 0:
             raise CoordinationError("Supervisor failed; child shutdown is uncertain")
-        result = _validate_result(
-            _read_json(root / "supervision.json", MAX_RECEIPT_BYTES)
-        )
+        result = _validate_result(_read_json(root / "supervision.json", MAX_RECEIPT_BYTES))
         if result.get("command_sha256") != digest(manifest):
             raise CoordinationError("Supervision command observation mismatch")
         if result.get("children_stopped") is not True:
@@ -227,6 +225,66 @@ def run_supervised(
     finally:
         if control is not None:
             os.close(control)
+        for sig, handler in handlers.items():
+            signal.signal(sig, handler)
+
+
+def _run_macos_supervised(config, payload, root, manifest):
+    """Run an isolated native-Mac worker; an uncertain acknowledgment fails closed."""
+    worker = None
+    handlers = {s: signal.getsignal(s) for s in SIGNALS}
+    try:
+        for sig in SIGNALS:
+            signal.signal(sig, _terminate)
+        mask = signal.pthread_sigmask(signal.SIG_BLOCK, SIGNALS)
+        try:
+            worker = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-B",
+                    "-m",
+                    "wintappy.coordination.supervisor",
+                    "--mac-worker",
+                ],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+                start_new_session=True,
+            )
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, mask)
+        worker.communicate(
+            input=payload,
+            timeout=config["timeout_seconds"] + config["shutdown_seconds"] + 10,
+        )
+        if worker.returncode != 0:
+            raise CoordinationError("Mac supervisor failed; reader release is uncertain")
+        result = _validate_result(_read_json(root / "supervision.json", MAX_RECEIPT_BYTES))
+        if (
+            result.get("command_sha256") != digest(manifest)
+            or result.get("shutdown_scope") != "process_group"
+            or result.get("children_stopped") is not True
+        ):
+            raise CoordinationError("Mac process-group shutdown is uncertain")
+        return result
+    except BaseException:
+        # An interrupted caller requests best-effort worker cleanup. If the worker
+        # is already dead or cannot acknowledge, the caller must retain its grant.
+        for sig in SIGNALS:
+            signal.signal(sig, signal.SIG_IGN)
+        if worker is not None and worker.poll() is None:
+            worker.send_signal(signal.SIGTERM)
+            try:
+                worker.wait(timeout=config["shutdown_seconds"] + 5)
+            except subprocess.TimeoutExpired:
+                worker.kill()
+                worker.wait(timeout=5)
+                raise CoordinationError(
+                    "Mac supervisor unresponsive; process-group shutdown is uncertain"
+                ) from None
+        raise
+    finally:
         for sig, handler in handlers.items():
             signal.signal(sig, handler)
 
@@ -261,9 +319,7 @@ def _read_bytes(path, budget):
 
 def _parse_json(payload):
     try:
-        value = json.loads(
-            payload, object_pairs_hook=_pairs, parse_constant=_invalid_constant
-        )
+        value = json.loads(payload, object_pairs_hook=_pairs, parse_constant=_invalid_constant)
     except (ValueError, UnicodeError, RecursionError):
         raise CoordinationError("Malformed structured report") from None
     if not isinstance(value, dict):
@@ -286,25 +342,25 @@ def read_report(directory, *, stream="stdout", max_bytes=1024 * 1024):
         raise CoordinationError("Truncated report cannot be accepted")
     path = root / f"{stream}.log"
     payload = _read_bytes(path, max_bytes)
-    if (
-        len(payload) != info["bytes_saved"]
-        or hashlib.sha256(payload).hexdigest() != info["sha256"]
-    ):
+    if len(payload) != info["bytes_saved"] or hashlib.sha256(payload).hexdigest() != info["sha256"]:
         raise CoordinationError("Captured report changed")
     # Parse exactly the immutable bytes just checked, not a second path read.
     return _parse_json(payload)
 
 
 def _validate_result(result):
-    if set(result) != {
+    fields = {
         "status",
         "exit_code",
         "children_stopped",
         "command_sha256",
         "stdout",
         "stderr",
-    }:
+    }
+    if set(result) not in (fields, fields | {"shutdown_scope"}):
         raise CoordinationError("Malformed supervision observation")
+    if "shutdown_scope" in result and result["shutdown_scope"] != "process_group":
+        raise CoordinationError("Malformed supervision shutdown scope")
     if (
         not isinstance(result["status"], str)
         or result["status"]
@@ -320,10 +376,7 @@ def _validate_result(result):
         }
         or type(result["children_stopped"]) is not bool
         or result["exit_code"] is not None
-        and (
-            type(result["exit_code"]) is not int
-            or not -255 <= result["exit_code"] <= 255
-        )
+        and (type(result["exit_code"]) is not int or not -255 <= result["exit_code"] <= 255)
         or not isinstance(result["command_sha256"], str)
         or not re.fullmatch("[a-f0-9]{64}", result["command_sha256"])
     ):
@@ -331,9 +384,7 @@ def _validate_result(result):
     if result["status"] in {"exited", "output_limit", "descendants_terminated"} and (
         result["exit_code"] is None or not result["children_stopped"]
     ):
-        raise CoordinationError(
-            "Completed supervision requires root exit and full shutdown"
-        )
+        raise CoordinationError("Completed supervision requires root exit and full shutdown")
     if result["status"] == "launch_failed" and (
         result["exit_code"] is not None or not result["children_stopped"]
     ):
@@ -439,9 +490,238 @@ def _stop_tree(root_pid, exit_code, seconds):
 
 
 def _manifest(config):
-    return {
-        k: v for k, v in config.items() if k not in {"env", "directory", "caller_pid"}
+    return {k: v for k, v in config.items() if k not in {"env", "directory", "caller_pid"}}
+
+
+def _mac_group_members(group_id):
+    """List live members while the unreaped group leader pins its numeric PGID."""
+    try:
+        listing = subprocess.run(
+            ["/bin/ps", "-axo", "pid=,pgid=,stat="],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if listing.returncode != 0:
+        return None
+    members = []
+    try:
+        for line in listing.stdout.splitlines():
+            pid, process_group, state = line.split(maxsplit=2)
+            if int(process_group) == group_id and not state.startswith("Z"):
+                members.append(int(pid))
+    except (TypeError, ValueError):
+        return None
+    return members
+
+
+def _mac_signal_group(group_id, signum):
+    try:
+        os.killpg(group_id, signum)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return False
+    return True
+
+
+def _mac_stop_group(group_id, child, exit_code, seconds):
+    deadline = time.monotonic() + seconds
+    while True:
+        members = _mac_group_members(group_id)
+        if members is None:
+            return exit_code, False
+        if not members:
+            if child.returncode is None:
+                try:
+                    exit_code = child.wait(timeout=max(0.01, deadline - time.monotonic()))
+                except subprocess.TimeoutExpired:
+                    return exit_code, False
+            elif exit_code is None:
+                exit_code = child.returncode
+            return exit_code, True
+        # Do not signal after wait()/poll(): macOS may reuse a PGID independently
+        # of the unreaped PID. While the direct child is unreaped, its group pins it.
+        if child.returncode is not None:
+            return exit_code, False
+        _mac_signal_group(group_id, signal.SIGKILL)
+        if time.monotonic() >= deadline:
+            return exit_code, False
+        time.sleep(0.01)
+
+
+def _mac_worker(config):
+    """Best-effort supervision of one dedicated native-Mac process group."""
+    root = Path(config["directory"])
+    manifest = _manifest(config)
+    stopping = False
+
+    def stop(signum, frame):
+        nonlocal stopping
+        stopping = True
+
+    for sig in SIGNALS:
+        signal.signal(sig, stop)
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, SIGNALS)
+    captures = {
+        name: _Capture(root, name, config["max_log_bytes"]) for name in ("stdout", "stderr")
     }
+    result = {
+        "status": "launch_failed",
+        "exit_code": None,
+        "children_stopped": True,
+        "shutdown_scope": "process_group",
+        "command_sha256": digest(manifest),
+    }
+    child = None
+    selector = None
+    process_events = None
+    group_id = None
+    exit_code = None
+    try:
+        if stopping or os.getppid() != config["caller_pid"]:
+            result["status"] = "interrupted"
+            return
+        try:
+            child = subprocess.Popen(
+                config["command"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=config["cwd"],
+                env=config["env"],
+                close_fds=True,
+                start_new_session=True,
+            )
+        except OSError:
+            return
+        group_id = child.pid
+        result["children_stopped"] = False
+        # NOTE_EXIT reports only the wrapper. Keeping it unreaped until group
+        # signals are finished pins the PGID and avoids signaling a recycled ID.
+        process_events = select.kqueue()
+        process_events.control(
+            [
+                select.kevent(
+                    child.pid,
+                    filter=select.KQ_FILTER_PROC,
+                    flags=select.KQ_EV_ADD | select.KQ_EV_ENABLE | select.KQ_EV_ONESHOT,
+                    fflags=select.KQ_NOTE_EXIT,
+                )
+            ],
+            0,
+            0,
+        )
+        selector = selectors.DefaultSelector()
+        for name in captures:
+            pipe = getattr(child, name)
+            os.set_blocking(pipe.fileno(), False)
+            selector.register(pipe, selectors.EVENT_READ, name)
+
+        started = time.monotonic()
+        stop_at = None
+        status = "exited"
+        stopped = False
+        root_exited = False
+        root_reaped = False
+        group_stopped = False
+        term_sent_at = None
+        kill_sent = False
+        shutdown_deadline = None
+        while True:
+            observed = time.monotonic()
+            if not root_exited and process_events.control(None, 1, 0):
+                root_exited = True
+            if stop_at is None:
+                if stopping or os.getppid() != config["caller_pid"]:
+                    status, stop_at = "interrupted", observed
+                    shutdown_deadline = observed + config["shutdown_seconds"]
+                elif not root_exited and observed - started >= config["timeout_seconds"]:
+                    status, stop_at = "timeout", observed
+                    shutdown_deadline = observed + config["shutdown_seconds"]
+                elif root_exited and shutdown_deadline is None:
+                    shutdown_deadline = observed + config["shutdown_seconds"]
+
+            if not root_reaped and (root_exited or stop_at is not None):
+                members = _mac_group_members(group_id)
+                if members is None:
+                    status = "shutdown_uncertain"
+                    break
+                if not members:
+                    # The wrapper remains an unreaped zombie until this check, so
+                    # its PGID cannot be confused with a newly reused identifier.
+                    group_stopped = True
+                elif stop_at is None:
+                    # The command wrapper exited with same-group descendants still
+                    # alive. Stop them while the unreaped group leader pins the PGID.
+                    status, stop_at = "descendants_terminated", observed
+                    shutdown_deadline = observed + config["shutdown_seconds"]
+
+                if members and stop_at is not None and not kill_sent:
+                    if term_sent_at is None:
+                        if _mac_signal_group(group_id, signal.SIGTERM):
+                            term_sent_at = observed
+                        else:
+                            status = "shutdown_uncertain"
+                            break
+                    elif observed - term_sent_at >= config["stop_grace_seconds"]:
+                        if _mac_signal_group(group_id, signal.SIGKILL):
+                            kill_sent = True
+                        else:
+                            status = "shutdown_uncertain"
+                            break
+
+            if group_stopped:
+                if not root_reaped:
+                    try:
+                        exit_code = child.wait(timeout=config["shutdown_seconds"])
+                    except subprocess.TimeoutExpired:
+                        status = "shutdown_uncertain"
+                        break
+                    root_reaped = True
+                if not selector.get_map():
+                    stopped = True
+                    break
+                if shutdown_deadline is None:
+                    shutdown_deadline = observed + config["shutdown_seconds"]
+
+            if shutdown_deadline is not None and observed >= shutdown_deadline:
+                status = "shutdown_uncertain"
+                break
+
+            for key, _ in selector.select(0.02):
+                chunk = os.read(key.fileobj.fileno(), 65536)
+                if chunk:
+                    captures[key.data].add(chunk)
+                else:
+                    selector.unregister(key.fileobj)
+                    key.fileobj.close()
+
+        result.update(status=status, exit_code=exit_code, children_stopped=stopped)
+    except BaseException:
+        result.update(status="supervisor_failed", exit_code=exit_code, children_stopped=False)
+        if child is not None and group_id is not None:
+            exit_code, stopped = _mac_stop_group(
+                group_id, child, exit_code, config["shutdown_seconds"]
+            )
+            result.update(exit_code=exit_code, children_stopped=stopped)
+        raise
+    finally:
+        if child is not None:
+            child.stdout.close()
+            child.stderr.close()
+        if selector is not None:
+            selector.close()
+        if process_events is not None:
+            process_events.close()
+        for name, capture in captures.items():
+            result[name] = capture.close()
+        if result["status"] == "exited" and any(result[name]["truncated"] for name in captures):
+            result["status"] = "output_limit"
+        _publish(root / "supervision.json", result)
 
 
 def _worker(config):
@@ -463,8 +743,7 @@ def _worker(config):
     if os.getppid() != parent or parent == 1:
         stopping = True
     captures = {
-        name: _Capture(root, name, config["max_log_bytes"])
-        for name in ("stdout", "stderr")
+        name: _Capture(root, name, config["max_log_bytes"]) for name in ("stdout", "stderr")
     }
     result = {
         "status": "launch_failed",
@@ -535,9 +814,7 @@ def _worker(config):
             # Logging, enumeration, selector and other failures must stop/reap
             # the tree too. Never retain the pre-launch 'no children' assertion.
             result.update(status="supervisor_failed", children_stopped=False)
-            exit_code, stopped = _stop_tree(
-                child.pid, exit_code, config["shutdown_seconds"]
-            )
+            exit_code, stopped = _stop_tree(child.pid, exit_code, config["shutdown_seconds"])
             result.update(exit_code=exit_code, children_stopped=stopped)
             raise
         finally:
@@ -550,18 +827,22 @@ def _worker(config):
     finally:
         for name, capture in captures.items():
             result[name] = capture.close()
-        if result["status"] == "exited" and any(
-            result[n]["truncated"] for n in captures
-        ):
+        if result["status"] == "exited" and any(result[n]["truncated"] for n in captures):
             result["status"] = "output_limit"
         _publish(root / "supervision.json", result)
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3 or sys.argv[1] != "--worker":
+    if len(sys.argv) == 2 and sys.argv[1] == "--mac-worker":
+        payload = sys.stdin.buffer.read(MAX_CONTROL_BYTES + 1)
+        if len(payload) > MAX_CONTROL_BYTES:
+            raise SystemExit("Supervision control exceeds byte budget")
+        _mac_worker(json.loads(payload))
+    elif len(sys.argv) == 3 and sys.argv[1] == "--worker":
+        with os.fdopen(int(sys.argv[2]), "rb") as source:
+            payload = source.read(MAX_CONTROL_BYTES + 1)
+        if len(payload) > MAX_CONTROL_BYTES:
+            raise SystemExit("Supervision control exceeds byte budget")
+        _worker(json.loads(payload))
+    else:
         raise SystemExit("Internal supervisor worker only")
-    with os.fdopen(int(sys.argv[2]), "rb") as source:
-        payload = source.read(MAX_CONTROL_BYTES + 1)
-    if len(payload) > MAX_CONTROL_BYTES:
-        raise SystemExit("Supervision control exceeds byte budget")
-    _worker(json.loads(payload))

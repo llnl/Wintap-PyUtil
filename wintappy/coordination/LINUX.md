@@ -1,8 +1,9 @@
 # Linux coordination integration
 
 Linux service/client integration is available for isolated qualification, not
-production deployment. Native-Mac reader shutdown remains with its native worker;
-the accepted offline Mac baseline is not a backend pass. Windows is outside scope.
+production deployment. Native-Mac has a separate best-effort process-group reader
+path; its synthetic actual-Mac lifecycle controls are not production/backend
+qualification. See [MACOS.md](MACOS.md). Windows is outside scope.
 Actual S3, representative resources and broader partial-run recovery remain open
 gates. The narrow deletion-disposition path below passes local regressions on the
 retained 265-identity revision: 788 main tests/three skips and 509 standalone tests/
@@ -85,8 +86,9 @@ retains its signal outcome locally for identical terminal retries. Unrelated
 
 Generic commands use the same binding/window/settings and lifetime contract.
 Commands delegated to external services are not contained by the Linux descendant
-backend. Native-Mac coordinated execution currently refuses explicitly. Local-only
-DBT remains available there. Optional polling interval is selected with
+backend. Native-Mac coordinated execution uses a separate process-group backend and
+is subject to the explicit residual risk and qualification limits in [MACOS.md](MACOS.md).
+Local-only DBT remains direct there. Optional polling interval is selected with
 `WINTAP_COORDINATION_POLL_SECONDS`; log/time/shutdown budgets remain bounded.
 
 ## Advisory producer interface

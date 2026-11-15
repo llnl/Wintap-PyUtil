@@ -1,4 +1,4 @@
-"""Offline local bypass and durable Linux shared-reader lifetime.
+"""Offline local bypass and durable Linux/native-Mac shared-reader lifetime.
 
 An existing launch marker never authorizes resuming work after wrapper death.
 Terminal retries only publish immutable messages; they cannot launch a command.
@@ -48,8 +48,7 @@ from .supervisor import (
 
 def coordinated_inputs(env):
     return any(
-        canonical_root(root).startswith("s3://")
-        for root in effective_input_roots(env).values()
+        canonical_root(root).startswith("s3://") for root in effective_input_roots(env).values()
     )
 
 
@@ -64,9 +63,7 @@ def binding_from_environment(env):
         entity = {
             "namespace": env.get("WINTAP_DBT_PROCESS_ENTITY_NAMESPACE", ""),
             "hosts": env.get("WINTAP_DBT_PROCESS_ENTITY_HOSTS", "").split(","),
-            "identity_policy": env.get(
-                "WINTAP_DBT_PROCESS_UNKNOWN_IDENTITY_POLICY", "reject"
-            ),
+            "identity_policy": env.get("WINTAP_DBT_PROCESS_UNKNOWN_IDENTITY_POLICY", "reject"),
             "identity_max_ratio": float(
                 env.get("WINTAP_DBT_PROCESS_UNKNOWN_IDENTITY_MAX_RATIO", "0.05")
             ),
@@ -85,11 +82,7 @@ def _job(directory, job_id, binding=None):
         root = _state_directory(root, binding)
     elif str(directory).startswith("s3://"):
         raise CoordinationError("Client retry state must be local")
-    path = (
-        _state_directory(root / job_id, binding)
-        if binding is not None
-        else root / job_id
-    )
+    path = _state_directory(root / job_id, binding) if binding is not None else root / job_id
     _mkdir(path)
     descriptor = os.open(
         path / "client.lock",
@@ -103,9 +96,7 @@ def _job(directory, job_id, binding=None):
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            raise CoordinationError(
-                "Client job busy; do not replace its identity"
-            ) from None
+            raise CoordinationError("Client job busy; do not replace its identity") from None
         os.fsync(descriptor)
         from .ledger import _fsync_directory
 
@@ -177,8 +168,7 @@ def _shutdown(path, request, grant):
     manifest = _invocation(path, request)
     launch = _read_json(path / "launch.json", 4096)
     if (
-        set(launch)
-        != {"version", "request_sha256", "grant_id", "started_at", "manifest_sha256"}
+        set(launch) != {"version", "request_sha256", "grant_id", "started_at", "manifest_sha256"}
         or type(launch["version"]) is not int
         or launch["version"] != 1
         or launch["request_sha256"] != request["request_sha256"]
@@ -188,13 +178,15 @@ def _shutdown(path, request, grant):
         raise CoordinationError("Reader launch/command/grant mismatch")
     timestamp(launch["started_at"])
     observations = path / "observations"
-    result = _validate_result(
-        _read_json(observations / "supervision.json", MAX_RECEIPT_BYTES)
-    )
+    result = _validate_result(_read_json(observations / "supervision.json", MAX_RECEIPT_BYTES))
     if (
         _read_json(observations / "command.json", 1024 * 1024) != manifest
         or result["command_sha256"] != digest(manifest)
         or result["children_stopped"] is not True
+        or sys.platform == "darwin"
+        and result.get("shutdown_scope") != "process_group"
+        or sys.platform == "linux"
+        and "shutdown_scope" in result
     ):
         raise CoordinationError(
             "Reader shutdown uncertain or command mismatched; retain reservation"
@@ -203,22 +195,17 @@ def _shutdown(path, request, grant):
 
 
 def _exit_code(result, signal_code):
-    if signal_code is not None and (
-        type(signal_code) is not int or signal_code not in {130, 143}
-    ):
+    if signal_code is not None and (type(signal_code) is not int or signal_code not in {130, 143}):
         raise CoordinationError("Invalid retained reader signal outcome")
     code = (
         signal_code
         if signal_code is not None
-        else 130
-        if result["status"] == "interrupted"
-        else result.get("exit_code")
+        else 130 if result["status"] == "interrupted" else result.get("exit_code")
     )
     if type(code) is not int or not -255 <= code <= 255:
         code = 1
     if (
-        result["status"]
-        in {"timeout", "output_limit", "supervisor_failed", "launch_failed"}
+        result["status"] in {"timeout", "output_limit", "supervisor_failed", "launch_failed"}
         and code == 0
     ):
         code = 1
@@ -265,9 +252,7 @@ def _transport(path, request, store, *, retain=False):
     if retain and not target.exists() and not (path / "request.json").exists():
         _publish(target, expected)
     if _read_json(target, 8192) != expected:
-        raise CoordinationError(
-            "Client transport differs from the original durable job"
-        )
+        raise CoordinationError("Client transport differs from the original durable job")
 
 
 def _terminal(path, request, store):
@@ -289,16 +274,12 @@ def _terminal(path, request, store):
             or message["grant_id"] != grant["grant_id"]
             or timestamp(message["completed_at"]) < timestamp(launch["started_at"])
         ):
-            raise CoordinationError(
-                "Pending release does not match recorded launch/grant"
-            )
+            raise CoordinationError("Pending release does not match recorded launch/grant")
     code = message.get("exit_code", 130)
     if message["kind"] == "cancellation":
         _invocation(path, request)
         if (path / "launch.json").exists():
-            raise CoordinationError(
-                "Pre-grant cancellation cannot retire a launched reader"
-            )
+            raise CoordinationError("Pre-grant cancellation cannot retire a launched reader")
         outcome = _read_json(path / "cancellation-outcome.json", 4096)
         if (
             set(outcome) != {"exit_code", "terminal_sha256"}
@@ -357,8 +338,10 @@ def run_reader(
     env=None,
 ):
     validate_message(request)
-    if request["kind"] != "request" or sys.platform != "linux":
-        raise CoordinationError("Coordinated reader backend is qualified only on Linux")
+    if request["kind"] != "request" or sys.platform not in {"linux", "darwin"}:
+        raise CoordinationError(
+            "Coordinated readers support only the Linux/macOS supervision paths"
+        )
     if (
         type(poll_seconds) not in (int, float)
         or not math.isfinite(poll_seconds)
@@ -397,9 +380,7 @@ def run_reader(
                 "Reader launch is unresolved; retain reservation for audited recovery"
             )
         # Persist identity before PUT. Request failure may already have reserved us.
-        handlers = {
-            sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)
-        }
+        handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
         try:
             for sig in handlers:
                 signal.signal(sig, _interrupted)
@@ -502,9 +483,9 @@ def _window(env):
             hour=int(env.get("WINTAP_DBT_" + edge + "_HOUR", "") or default_hour)
         )
         bounds.append(value)
-    return bounds[0].strftime("%Y-%m-%dT%H:%M:%SZ"), (
-        bounds[1] + timedelta(hours=1)
-    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return bounds[0].strftime("%Y-%m-%dT%H:%M:%SZ"), (bounds[1] + timedelta(hours=1)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
 
 
 def main(argv=None):
@@ -534,24 +515,20 @@ def main(argv=None):
             "shared-command",
         } and not coordinated_inputs(os.environ):
             # No SDK/ledger/client-state initialization on entirely local input roots.
-            return _dbt_run(
-                args.action, shlex.split(args.dbt_command), args.dbt_project
-            )
+            return _dbt_run(args.action, shlex.split(args.dbt_command), args.dbt_project)
         from .service import open_message_store
 
         root = os.environ.get("WINTAP_COORDINATION_ROOT", "")
         directory = os.environ.get("WINTAP_COORDINATION_CLIENT_STATE", "")
         if not directory:
-            raise CoordinationError(
-                "Explicit local client retry-state directory required"
-            )
+            raise CoordinationError("Explicit local client retry-state directory required")
         binding = binding_from_environment(os.environ)
         separate_transport_root(root, binding)
         if not root.startswith("s3://"):
             raise CoordinationError("S3 coordination root required")
-        if sys.platform != "linux":
+        if sys.platform not in {"linux", "darwin"}:
             raise CoordinationError(
-                "Native-Mac reader backend is pending; no coordinated fallback"
+                "Coordinated readers support only Linux and native macOS; no fallback"
             )
         store = open_message_store(root, {})
         if args.action == "retry-terminal":
@@ -598,9 +575,7 @@ def main(argv=None):
                 request,
                 store,
                 command,
-                poll_seconds=float(
-                    os.environ.get("WINTAP_COORDINATION_POLL_SECONDS", "10")
-                ),
+                poll_seconds=float(os.environ.get("WINTAP_COORDINATION_POLL_SECONDS", "10")),
                 cwd=os.getcwd(),
                 env=dict(os.environ),
             )
@@ -608,9 +583,7 @@ def main(argv=None):
         return (
             2
             if result["terminal_pending"]
-            else result["exit_code"]
-            if result["exit_code"] >= 0
-            else 128 - result["exit_code"]
+            else result["exit_code"] if result["exit_code"] >= 0 else 128 - result["exit_code"]
         )
     except (CoordinationError, OSError, ValueError):
         identity = " job_id=" + outstanding_job_id if outstanding_job_id else ""
