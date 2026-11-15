@@ -1,0 +1,5 @@
+# Example only: do not install before isolated endpoint/resource qualification.
+# Replace paths; provision persistent local state and separate spill/evidence.
+SHELL=/bin/sh
+PATH=/usr/local/bin:/usr/bin:/bin
+* * * * * /opt/wintap-pyutil/.venv/bin/python -B -m wintappy.coordination.service tick --config /etc/wintap/coordination.json >> /var/log/wintap/coordination.log 2>&1

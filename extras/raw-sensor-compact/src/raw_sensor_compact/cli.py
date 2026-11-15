@@ -37,6 +37,7 @@ def parser() -> argparse.ArgumentParser:
         "entities-replay",
         "entities-verify",
         "checkpoints-repair",
+        "deletions-repair",
     ):
         command = commands.add_parser(name)
         command.add_argument(
@@ -62,7 +63,7 @@ def parser() -> argparse.ArgumentParser:
                 default=10,
                 help="Minimum age after hour end for deletion (default 10; minimum 5)",
             )
-        if name in {"compact", "reconcile-delete"}:
+        if name in {"compact", "reconcile-delete", "deletions-repair"}:
             command.add_argument(
                 "--delete-confirm-attempts",
                 type=int,
@@ -99,7 +100,7 @@ def parser() -> argparse.ArgumentParser:
             "--run-evidence-directory",
             help="Separate server-local immutable run archive",
         )
-        if name == "checkpoints-repair":
+        if name in {"checkpoints-repair", "deletions-repair"}:
             command.add_argument("--repair-run-id", required=True)
             command.add_argument(
                 "--confirm-repair",
@@ -306,6 +307,20 @@ def _run(args, run_id, coordinator_id, state) -> tuple[dict, int]:
             "Checkpoint repair requires entity mode, original run evidence "
             "and explicit --confirm-repair"
         )
+    if args.command == "deletions-repair" and (
+        not getattr(args, "run_evidence_directory", None)
+        or not args.confirm_repair
+        or not events
+        or list(events) != sorted(set(events))
+        or any(
+            h + timedelta(hours=1, minutes=5) > datetime.now(timezone.utc)
+            for h in hours
+        )
+    ):
+        raise CompactionError(
+            "Deletion repair requires original evidence, explicit events, "
+            "closed hours and --confirm-repair"
+        )
     if args.processing_metrics_root and entity_root is None:
         raise CompactionError(
             "Processing metrics require --process-entity-root; do not run raw-only mode"
@@ -456,7 +471,12 @@ def _run(args, run_id, coordinator_id, state) -> tuple[dict, int]:
                 args.entity_namespace,
                 EntityLimits(args.max_entity_rows, args.max_entity_bytes),
             )
-            if args.command in {"entities-verify", "verify", "checkpoints-repair"}:
+            if args.command in {
+                "entities-verify",
+                "verify",
+                "checkpoints-repair",
+                "deletions-repair",
+            }:
 
                 def verify_current_entities():
                     return _verify_entity_state(
@@ -485,7 +505,7 @@ def _run(args, run_id, coordinator_id, state) -> tuple[dict, int]:
                 if args.command == "entities-verify":
                     return report, 0
                 entity_report = report
-            if args.command != "verify":
+            if args.command not in {"verify", "deletions-repair"}:
                 # Check raw deletion preflight before any entity publication.
                 if getattr(args, "delete_source", False):
                     grace = args.grace_minutes
@@ -527,6 +547,24 @@ def _run(args, run_id, coordinator_id, state) -> tuple[dict, int]:
                                 "processing_metrics"
                             ]
                     return entity_report, 0
+        if args.command == "deletions-repair":
+            from .deletion_recovery import repair_deletions
+
+            return repair_deletions(
+                conn,
+                args,
+                archive,
+                evidence_binding,
+                source_store,
+                merged_store,
+                metrics,
+                hours,
+                events,
+                limits,
+                verify_current_entities=verify_current_entities
+                if entity_root
+                else lambda: None,
+            ), 0
         if args.command in {"plan", "compact"}:
             report = process_hours(
                 conn,

@@ -5,6 +5,7 @@ UV_RUN=uv run
 DBT_UV_RUN ?= uv run --dev
 DBT_DIR=wintap_dbt
 DBT=$(DBT_UV_RUN) --project . dbt
+DBT_ROUTE=$(DBT_UV_RUN) --project . python -m wintappy.coordination.client --dbt-command '$(DBT)' --dbt-project $(DBT_DIR)
 
 WINTAP_DBT_DATASET ?= $(WINTAP_DATA_ROOT)
 WINTAP_DBT_RAW_SENSOR_DATASET ?= $(WINTAP_DBT_DATASET)
@@ -100,19 +101,19 @@ print-dbt-config: dbt-check-config
 	@echo "WINTAP_DBT_END_HOUR=$$WINTAP_DBT_END_HOUR"
 
 dbt-check-source: dbt-check-config
-	$(DBT) run-operation validate_raw_sensor_source --project-dir $(DBT_DIR) --profiles-dir $(DBT_DIR)
+	$(DBT_ROUTE) dbt-source
 
 dbt-debug: dbt-check-config
-	$(DBT) debug --project-dir $(DBT_DIR) --profiles-dir $(DBT_DIR)
+	$(DBT_ROUTE) dbt-debug
 
-dbt-build: dbt-check-source
-	$(DBT) build --project-dir $(DBT_DIR) --profiles-dir $(DBT_DIR)
+dbt-build: dbt-check-config
+	$(DBT_ROUTE) dbt-build
 
 dbt-test: dbt-check-config
-	$(DBT) test --project-dir $(DBT_DIR) --profiles-dir $(DBT_DIR)
+	$(DBT_ROUTE) dbt-test
 
 dbt-docs: dbt-check-config
-	$(DBT) docs generate --project-dir $(DBT_DIR) --profiles-dir $(DBT_DIR)
+	$(DBT_ROUTE) dbt-docs
 
 qa-pid-hash: dbt-check-config
 	duckdb -cmd ".maxwidth 240" "$$WINTAP_DBT_DATABASE" < $(DBT_DIR)/qa/pid_hash_orphan_checks.sql

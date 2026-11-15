@@ -301,7 +301,7 @@ def runtime_identity(executable, project):
         ) from None
 
 
-def _validate_settings(settings, binding):
+def _validate_settings(settings, binding, *, check_storage=True):
     if not isinstance(settings, dict) or set(settings) != SETTINGS:
         raise CoordinationError("Execution settings must be allowlisted and complete")
     for key, low, high in (
@@ -383,6 +383,10 @@ def _validate_settings(settings, binding):
     }:
         raise CoordinationError("Execution archive budgets mismatch")
     storage = settings["storage"]
+    if not check_storage:
+        # Offline service validation cannot resolve credentials/endpoint selection.
+        # Receipt preparation always performs the complete storage validation.
+        return
     remote = any(r.startswith("s3://") for r in binding["roots"].values())
     if not remote:
         if storage is not None:

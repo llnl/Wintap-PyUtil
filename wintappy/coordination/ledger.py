@@ -93,7 +93,7 @@ SCHEMA_V2 = (
     SCHEMA_V1.replace("CHECK (schema_version=1)", "CHECK (schema_version=2)")
     + AUTHORITY_SCHEMA
 )
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 COMPLETION_SCHEMA = """
 CREATE TABLE completion_evidence (
     sequence BIGINT PRIMARY KEY,
@@ -103,7 +103,7 @@ CREATE TABLE completion_evidence (
     previous_sha256 VARCHAR NOT NULL
 );
 """
-SCHEMA = (
+SCHEMA_V3 = (
     SCHEMA_V2.replace("CHECK (schema_version=2)", "CHECK (schema_version=3)")
     .replace(
         "binding_json VARCHAR NOT NULL\n",
@@ -114,9 +114,53 @@ SCHEMA = (
     )
     + COMPLETION_SCHEMA
 )
+RETRY_SCHEMA = """
+CREATE TABLE retry_dispositions (
+    sequence BIGINT PRIMARY KEY,
+    original_run_id VARCHAR NOT NULL UNIQUE,
+    retry_run_id VARCHAR NOT NULL UNIQUE,
+    proof_json VARCHAR NOT NULL,
+    proof_sha256 VARCHAR NOT NULL UNIQUE,
+    previous_sha256 VARCHAR NOT NULL
+);
+"""
+SCHEMA = (
+    SCHEMA_V3.replace("CHECK (schema_version=3)", "CHECK (schema_version=4)")
+    + RETRY_SCHEMA
+)
+# v5 is opt-in, not the initialization/default-upgrade version. Entity permissions
+# are separate from raw hours. Typed unresolved intents are supported; entity
+# original-publication evidence remains separate from completion/recovery history.
+ENTITY_SCHEMA = """
+CREATE TABLE entity_runs (
+    run_id VARCHAR PRIMARY KEY,
+    cli_run_id VARCHAR NOT NULL UNIQUE,
+    entity_command VARCHAR NOT NULL CHECK (entity_command IN ('entities-init','entities-replay')),
+    hour_start VARCHAR NOT NULL,
+    hour_end VARCHAR NOT NULL,
+    state VARCHAR NOT NULL CHECK (state IN ('INTENT','BLOCKED','COMPLETED')),
+    started_at VARCHAR NOT NULL,
+    intent_json VARCHAR NOT NULL,
+    intent_sha256 VARCHAR NOT NULL,
+    block_reason VARCHAR NOT NULL
+);
+CREATE TABLE entity_evidence (
+    sequence BIGINT PRIMARY KEY,
+    run_id VARCHAR NOT NULL UNIQUE,
+    proof_json VARCHAR NOT NULL,
+    proof_sha256 VARCHAR NOT NULL UNIQUE,
+    previous_sha256 VARCHAR NOT NULL
+);
+"""
+SCHEMA_V5 = (
+    SCHEMA.replace("CHECK (schema_version=4)", "CHECK (schema_version=5)")
+    + ENTITY_SCHEMA
+)
 TABLES_V1 = {"metadata", "dataset_state", "jobs", "outbox", "compaction_runs", "events"}
 TABLES_V2 = TABLES_V1 | {"authority_checks"}
-TABLES = TABLES_V2 | {"completion_evidence"}
+TABLES_V3 = TABLES_V2 | {"completion_evidence"}
+TABLES = TABLES_V3 | {"retry_dispositions"}
+TABLES_V5 = TABLES | {"entity_runs", "entity_evidence"}
 COLUMNS = {
     "metadata": (
         "singleton",
@@ -163,6 +207,33 @@ COLUMNS = {
         "proof_sha256",
         "previous_sha256",
     ),
+    "retry_dispositions": (
+        "sequence",
+        "original_run_id",
+        "retry_run_id",
+        "proof_json",
+        "proof_sha256",
+        "previous_sha256",
+    ),
+    "entity_runs": (
+        "run_id",
+        "cli_run_id",
+        "entity_command",
+        "hour_start",
+        "hour_end",
+        "state",
+        "started_at",
+        "intent_json",
+        "intent_sha256",
+        "block_reason",
+    ),
+    "entity_evidence": (
+        "sequence",
+        "run_id",
+        "proof_json",
+        "proof_sha256",
+        "previous_sha256",
+    ),
 }
 
 
@@ -181,7 +252,15 @@ def _mkdir(path):
         missing.append(current)
         current = current.parent
     for directory in reversed(missing):
-        directory.mkdir(mode=0o700)
+        try:
+            directory.mkdir(mode=0o700)
+        except FileExistsError:
+            # Different durable reader jobs may share a first-start parent. Only an
+            # actual directory is safe to reuse; never follow a concurrent alias.
+            if not stat.S_ISDIR(directory.lstat().st_mode):
+                raise CoordinationError(
+                    "Concurrent state creation is not a directory"
+                ) from None
         _fsync_directory(directory.parent)
         _fsync_directory(directory)
 
@@ -258,6 +337,7 @@ class Ledger:
         self.failure_hook = lambda phase: None
         self._authority_checked = None
         self._completion_live_run = None
+        self._entity_live_intent = None
 
     @classmethod
     def initialize(cls, directory, binding, first_hour):
@@ -276,7 +356,7 @@ class Ledger:
                 with ledger._transaction():
                     connection.execute(SCHEMA)
                     connection.execute(
-                        "INSERT INTO metadata VALUES (1,3,?,?,?)",
+                        "INSERT INTO metadata VALUES (1,4,?,?,?)",
                         [uuid4().hex, ledger.binding, first_hour],
                     )
                     connection.execute(
@@ -292,16 +372,38 @@ class Ledger:
                         _now(),
                         {"first_hour": first_hour, "source_schema": 0},
                     )
+                    ledger._event(
+                        "retry_history_initialized",
+                        "dataset",
+                        _now(),
+                        {"source_schema": 0},
+                    )
                 connection.execute("CHECKPOINT")
             finally:
                 connection.close()
             _fsync_directory(directory)
 
     @classmethod
-    def upgrade(cls, directory, binding, now, *, confirmed=False, reason=None):
-        """Explicit compatible v1/v2 upgrade; preserve all permissions and evidence."""
+    def upgrade(
+        cls,
+        directory,
+        binding,
+        now,
+        *,
+        confirmed=False,
+        reason=None,
+        target_version=SCHEMA_VERSION,
+    ):
+        """Default compatible v4 upgrade, or explicitly confirmed opt-in v5.
+
+        Ordinary open never migrates. Opt-in upgrade preserves original writer
+        disposition as well as retained bytes; subsequent open still blocks a
+        restart-visible INTENT. Schema selection alone grants no entity permission.
+        """
         validate_binding(binding)
         timestamp(now)
+        if type(target_version) is not int or target_version not in {4, 5}:
+            raise CoordinationError("Ledger upgrade target must be exactly 4 or 5")
         if confirmed is not True:
             raise CoordinationError("Ledger upgrade requires explicit confirmation")
         _validate_block_reason(reason)
@@ -319,24 +421,58 @@ class Ledger:
                 source = connection.execute(
                     "SELECT schema_version FROM metadata"
                 ).fetchall()
-                if source not in [[(1,)], [(2,)]]:
+                if source not in [[(version,)] for version in range(1, target_version)]:
                     raise CoordinationError(
-                        "Only compatible v1/v2 ledger upgrade is supported"
+                        "Only compatible v1/v2/v3 ledger upgrade is supported"
+                        if target_version == SCHEMA_VERSION
+                        else "Only an older compatible ledger may upgrade to the selected target"
                     )
                 version = source[0][0]
                 ledger._validate(version=version)
+                if target_version == 5:
+                    ledger._upgrade_entity_schema(version, now, reason)
+                    connection.execute("CHECKPOINT")
+                    return
                 ledger._block_unresolved_writer()
+                if version == 3:
+                    with ledger._transaction(kind="upgrade"):
+                        connection.execute(
+                            "ALTER TABLE metadata RENAME TO metadata_old"
+                        )
+                        connection.execute(
+                            SCHEMA.split("CREATE TABLE dataset_state", 1)[0]
+                        )
+                        connection.execute(
+                            "INSERT INTO metadata SELECT singleton,4,ledger_id,binding_json,first_hour FROM metadata_old"
+                        )
+                        connection.execute("DROP TABLE metadata_old")
+                        connection.execute(RETRY_SCHEMA)
+                        ledger._event(
+                            "schema_upgraded",
+                            "dataset",
+                            now,
+                            {"from": version, "to": SCHEMA_VERSION, "reason": reason},
+                        )
+                        ledger._event(
+                            "retry_history_initialized",
+                            "dataset",
+                            now,
+                            {"source_schema": version},
+                        )
+                        ledger._validate()
+                    connection.execute("CHECKPOINT")
+                    return
                 with ledger._transaction():
                     connection.execute("ALTER TABLE metadata RENAME TO metadata_old")
                     connection.execute("""CREATE TABLE metadata (
                         singleton INTEGER PRIMARY KEY CHECK (singleton=1),
-                        schema_version INTEGER NOT NULL CHECK (schema_version=3),
+                        schema_version INTEGER NOT NULL CHECK (schema_version=4),
                         ledger_id VARCHAR NOT NULL UNIQUE, binding_json VARCHAR NOT NULL,
                         first_hour VARCHAR NOT NULL
                     )""")
                     connection.execute(
                         "INSERT INTO metadata "
-                        "SELECT singleton,3,ledger_id,binding_json,"
+                        "SELECT singleton,4,ledger_id,binding_json,"
                         "(SELECT next_hour FROM dataset_state) FROM metadata_old"
                     )
                     connection.execute("DROP TABLE metadata_old")
@@ -360,6 +496,7 @@ class Ledger:
                     if version == 1:
                         connection.execute(AUTHORITY_SCHEMA)
                     connection.execute(COMPLETION_SCHEMA)
+                    connection.execute(RETRY_SCHEMA)
                     ledger._event(
                         "schema_upgraded",
                         "dataset",
@@ -375,6 +512,12 @@ class Ledger:
                             "source_schema": version,
                         },
                     )
+                    ledger._event(
+                        "retry_history_initialized",
+                        "dataset",
+                        now,
+                        {"source_schema": version},
+                    )
                     ledger._validate()
                 connection.execute("CHECKPOINT")
             except duckdb.Error:
@@ -384,7 +527,73 @@ class Ledger:
             finally:
                 if connection is not None:
                     connection.close()
-            _fsync_directory(directory)
+                _fsync_directory(directory)
+
+    def _upgrade_entity_schema(self, version, now, reason):
+        """One actual COMMIT, preserving old proof/run/reader/outbox rows verbatim."""
+        connection = self._connection
+        with self._transaction(kind="upgrade"):
+            connection.execute("ALTER TABLE metadata RENAME TO metadata_old")
+            connection.execute(SCHEMA_V5.split("CREATE TABLE dataset_state", 1)[0])
+            origin = (
+                "first_hour"
+                if version >= 3
+                else "(SELECT next_hour FROM dataset_state)"
+            )
+            connection.execute(
+                "INSERT INTO metadata SELECT singleton,5,ledger_id,binding_json,"
+                + origin
+                + " FROM metadata_old"
+            )
+            connection.execute("DROP TABLE metadata_old")
+            if version < 3:
+                connection.execute(
+                    "ALTER TABLE compaction_runs RENAME TO compaction_runs_old"
+                )
+                connection.execute(
+                    "CREATE TABLE compaction_runs ("
+                    + SCHEMA_V3.split("CREATE TABLE compaction_runs (", 1)[1].split(
+                        "CREATE TABLE events", 1
+                    )[0]
+                )
+                connection.execute(
+                    "INSERT INTO compaction_runs SELECT * FROM compaction_runs_old"
+                )
+                connection.execute("DROP TABLE compaction_runs_old")
+                if version == 1:
+                    connection.execute(AUTHORITY_SCHEMA)
+                connection.execute(COMPLETION_SCHEMA)
+                self._event(
+                    "completion_history_initialized",
+                    "dataset",
+                    now,
+                    {
+                        "first_hour": self.snapshot()["next_hour"],
+                        "source_schema": version,
+                    },
+                )
+            if version < 4:
+                connection.execute(RETRY_SCHEMA)
+                self._event(
+                    "retry_history_initialized",
+                    "dataset",
+                    now,
+                    {"source_schema": version},
+                )
+            connection.execute(ENTITY_SCHEMA)
+            self._event(
+                "schema_upgraded",
+                "dataset",
+                now,
+                {"from": version, "to": 5, "reason": reason},
+            )
+            self._event(
+                "entity_history_initialized",
+                "dataset",
+                now,
+                {"source_schema": version},
+            )
+            self._validate(version=5)
 
     @classmethod
     @contextmanager
@@ -444,16 +653,34 @@ class Ledger:
             [uuid4().hex, now, kind, identity, canonical(details)],
         )
 
-    def _validate(self, *, version=SCHEMA_VERSION):
+    def _validate(self, *, version=None):
         connection = self._connection
+        if version is None:
+            source = connection.execute(
+                "SELECT schema_version FROM metadata"
+            ).fetchall()
+            if source not in [[(4,)], [(5,)]]:
+                raise CoordinationError(
+                    "Ledger schema mismatch; explicit upgrade/recovery required"
+                )
+            version = source[0][0]
         tables = {r[0] for r in connection.execute("SHOW TABLES").fetchall()}
-        if tables != {1: TABLES_V1, 2: TABLES_V2, 3: TABLES}.get(version):
+        if tables != {
+            1: TABLES_V1,
+            2: TABLES_V2,
+            3: TABLES_V3,
+            4: TABLES,
+            5: TABLES_V5,
+        }.get(version):
             raise CoordinationError(
                 "Ledger schema mismatch; explicit upgrade/recovery required"
             )
         for table, expected in COLUMNS.items():
-            if (version == 1 and table == "authority_checks") or (
-                version < 3 and table == "completion_evidence"
+            if (
+                (version == 1 and table == "authority_checks")
+                or (version < 3 and table == "completion_evidence")
+                or (version < 4 and table == "retry_dispositions")
+                or (version < 5 and table in {"entity_runs", "entity_evidence"})
             ):
                 continue
             if table == "metadata" and version < 3:
@@ -482,7 +709,7 @@ class Ledger:
         ):
             raise CoordinationError("Ledger schema/binding mismatch")
         identifier(metadata[0][2])
-        if version == 3:
+        if version >= 3:
             timestamp(metadata[0][4], hour=True)
         state = connection.execute("SELECT * FROM dataset_state").fetchall()
         if len(state) != 1 or state[0][0] != 1:
@@ -493,6 +720,10 @@ class Ledger:
             raise CoordinationError("Invalid ledger mode")
         if mode in {"OPEN", "DRAINING"} and (run_id is not None or reason):
             raise CoordinationError("Unresolved writer cannot be an open ledger")
+        if version >= 5:
+            # Bound/authenticate typed history before fetching owner identifiers
+            # or extracting owner JSON, including within upgrade/intent COMMITs.
+            self._validate_entity_schema_origin()
         if mode in {"WRITING", "BLOCKED"}:
             if mode == "BLOCKED":
                 _validate_block_reason(reason)
@@ -504,6 +735,12 @@ class Ledger:
                 "SELECT hour_start,state,block_reason FROM compaction_runs WHERE run_id=?",
                 [run_id],
             ).fetchall()
+            if not run and version >= 5:
+                run = connection.execute(
+                    "SELECT json_extract_string(intent_json,'$.raw_next_hour'),state,block_reason "
+                    "FROM entity_runs WHERE run_id=?",
+                    [run_id],
+                ).fetchall()
             if run != [(hour, "INTENT" if mode == "WRITING" else "BLOCKED", reason)]:
                 raise CoordinationError("Unresolved writer run/ledger mismatch")
             if connection.execute(
@@ -512,7 +749,16 @@ class Ledger:
                 raise CoordinationError("Reader reservation overlaps unresolved writer")
         runs = connection.execute(
             "SELECT run_id FROM compaction_runs WHERE state<>'COMPLETED'"
+            + (
+                " AND run_id NOT IN (SELECT original_run_id FROM retry_dispositions)"
+                if version >= 4
+                else ""
+            )
         ).fetchall()
+        if version >= 5:
+            runs += connection.execute(
+                "SELECT run_id FROM entity_runs WHERE state<>'COMPLETED'"
+            ).fetchall()
         if runs != ([(run_id,)] if run_id is not None else []):
             raise CoordinationError(
                 "Orphan/unresolved writer history requires explicit recovery"
@@ -573,8 +819,178 @@ class Ledger:
                 self._validate_intent_row(row)
         if version >= 2:
             self._validate_authority_checks()
-        if version == 3:
+        if version >= 4:
+            from .intentional_retry import validate_history
+
+            validate_history(self)
+        if version >= 3:
             self._validate_completion_history()
+            self._validate_reader_recoveries()
+
+    def _validate_entity_schema_origin(self):
+        """Authenticate explicit selection and typed unresolved original history.
+
+        Original publication is bounded; completion/recovery have no fallback.
+        """
+        origin = self._connection.execute(
+            "SELECT identity,observed_at,"
+            "CASE WHEN octet_length(encode(details_json))<=16384 "
+            "THEN details_json ELSE NULL END FROM events "
+            "WHERE kind='entity_history_initialized' LIMIT 2"
+        ).fetchall()
+        upgrades = self._connection.execute(
+            "SELECT identity,observed_at,"
+            "CASE WHEN octet_length(encode(details_json))<=16384 "
+            "THEN details_json ELSE NULL END FROM events "
+            "WHERE kind='schema_upgraded' "
+            "AND json_extract_string(details_json,'$.to')='5' LIMIT 2"
+        ).fetchall()
+        try:
+            if len(origin) != 1 or len(upgrades) != 1:
+                raise ValueError
+            identity, observed, encoded = origin[0]
+            upgrade_identity, upgraded, upgrade_encoded = upgrades[0]
+            if encoded is None or upgrade_encoded is None:
+                raise ValueError
+            details, upgrade = json.loads(encoded), json.loads(upgrade_encoded)
+            timestamp(observed)
+            if (
+                identity != "dataset"
+                or upgrade_identity != identity
+                or upgraded != observed
+                or canonical(details) != encoded
+                or set(details) != {"source_schema"}
+                or type(details["source_schema"]) is not int
+                or details["source_schema"] not in {1, 2, 3, 4}
+                or canonical(upgrade) != upgrade_encoded
+                or set(upgrade) != {"from", "to", "reason"}
+                or type(upgrade["from"]) is not int
+                or upgrade["from"] != details["source_schema"]
+                or type(upgrade["to"]) is not int
+                or upgrade["to"] != 5
+            ):
+                raise ValueError
+            _validate_block_reason(upgrade["reason"])
+        except (TypeError, ValueError, KeyError, RecursionError):
+            raise CoordinationError(
+                "Entity schema origin/upgrade audit conflict"
+            ) from None
+        from .entity_intent import validate_history
+
+        validate_history(self)
+
+    def _require_entity_schema(self):
+        if self._connection.execute(
+            "SELECT schema_version FROM metadata"
+        ).fetchall() != [(5,)]:
+            raise CoordinationError(
+                "Entity operations require explicit opt-in v5 upgrade"
+            )
+
+    def entity_run(self, run_id):
+        identifier(run_id)
+        self._require_entity_schema()
+        self._validate_entity_schema_origin()
+        cursor = self._connection.execute(
+            "SELECT * FROM entity_runs WHERE run_id=?", [run_id]
+        )
+        row = cursor.fetchone()
+        return (
+            dict(zip((c[0] for c in cursor.description), row, strict=True))
+            if row
+            else None
+        )
+
+    def entity_evidence(self, run_id):
+        identifier(run_id)
+        self._require_entity_schema()
+        self._validate_entity_schema_origin()
+        from .entity_history import retained_record
+
+        completion = retained_record(self, run_id)
+        if completion is not None:
+            return json.loads(canonical(completion["proof"]))
+        row = self._connection.execute(
+            "SELECT proof_json FROM entity_evidence WHERE run_id=?", [run_id]
+        ).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def _validate_reader_recoveries(self):
+        """Retain both the cancellation marker and exact operator attestation.
+
+        Independent cursors prevent lookups from replacing the paged audit scan.
+        This is local integrity, not coherent whole-ledger rollback detection.
+        """
+        cursor = self._connection.cursor()
+        try:
+            cursor.execute(
+                "SELECT kind,identity,observed_at,details_json FROM events WHERE kind IN ('cancellation','reader_recovered')"
+            )
+            while batch := cursor.fetchmany(256):
+                for kind, job_id, observed, encoded in batch:
+                    details = json.loads(encoded)
+                    if (
+                        not isinstance(details, dict)
+                        or len(encoded.encode()) > 16 * 1024
+                        or canonical(details) != encoded
+                    ):
+                        raise ValueError
+                    if kind == "cancellation" and "operator_recovery" not in details:
+                        continue
+                    identifier(job_id)
+                    timestamp(observed)
+                    job = self.job(job_id)
+                    if (
+                        job is None
+                        or job["state"] != "CANCELLED"
+                        or not job["terminal_json"]
+                    ):
+                        raise ValueError
+                    terminal = json.loads(job["terminal_json"])
+                    expected_marker = {
+                        "request_sha256": job["request_sha256"],
+                        "operator_recovery": True,
+                        "terminal_sha256": digest(terminal),
+                    }
+                    markers = self._connection.execute(
+                        "SELECT observed_at,details_json FROM events WHERE kind='cancellation' AND identity=? LIMIT 2",
+                        [job_id],
+                    ).fetchall()
+                    audits = self._connection.execute(
+                        "SELECT observed_at,details_json FROM events WHERE kind='reader_recovered' AND identity=? LIMIT 2",
+                        [job_id],
+                    ).fetchall()
+                    if (
+                        markers != [(observed, canonical(expected_marker))]
+                        or len(audits) != 1
+                        or audits[0][0] != observed
+                        or terminal["cancelled_at"] != observed
+                    ):
+                        raise ValueError
+                    audit = json.loads(audits[0][1])
+                    if (
+                        set(audit)
+                        != {
+                            "reason",
+                            "confirmed_cannot_resume",
+                            "request_sha256",
+                            "grant_id",
+                            "terminal_sha256",
+                        }
+                        or canonical(audit) != audits[0][1]
+                        or audit["confirmed_cannot_resume"] is not True
+                        or audit["request_sha256"] != job["request_sha256"]
+                        or audit["grant_id"] != job["grant_id"]
+                        or audit["terminal_sha256"] != digest(terminal)
+                    ):
+                        raise ValueError
+                    _validate_block_reason(audit["reason"])
+        except (TypeError, ValueError, KeyError, RecursionError):
+            raise CoordinationError(
+                "Reader recovery audit/terminal integrity mismatch"
+            ) from None
+        finally:
+            cursor.close()
 
     def _validate_intent_row(self, row):
         (
@@ -640,10 +1056,19 @@ class Ledger:
         previous, previous_hash, count = None, "", 0
         binding = json.loads(self.binding)
         ledger_id = self.ledger_id
-        rows = self._connection.execute(
-            "SELECT * FROM authority_checks ORDER BY sequence"
-        )
-        while batch := rows.fetchmany(256):
+        expected_count, largest = self._connection.execute(
+            "SELECT count(*),coalesce(max(octet_length(encode(proof_json))),0) "
+            "FROM authority_checks"
+        ).fetchone()
+        if expected_count > MAX_AUTHORITY_CHECKS or largest > MAX_AUTHORITY_BYTES:
+            raise CoordinationError("Authority high-water history exceeds budget")
+        while True:
+            batch = self._connection.execute(
+                "SELECT * FROM authority_checks WHERE sequence>? ORDER BY sequence LIMIT 256",
+                [count],
+            ).fetchall()
+            if not batch:
+                break
             for sequence, payload, sha256, predecessor in batch:
                 count += 1
                 if (
@@ -659,12 +1084,50 @@ class Ledger:
                     proof = json.loads(payload)
                     if canonical(proof) != payload or digest(proof) != sha256:
                         raise ValueError
-                    previous = validate_proof(proof, binding, ledger_id, previous)
+                    if proof.get("operation") == "entity-completion-authority":
+                        self._require_entity_schema()
+                        from .entity_history import validate_authority_reference
+
+                        previous = validate_authority_reference(
+                            self, proof, previous, previous_hash
+                        )
+                    else:
+                        previous = validate_proof(proof, binding, ledger_id, previous)
                 except (TypeError, ValueError, KeyError, RecursionError):
                     raise CoordinationError(
                         "Authority high-water evidence is malformed"
                     ) from None
                 previous_hash = sha256
+        if count != expected_count:
+            raise CoordinationError("Authority high-water history count conflict")
+
+    def _insert_entity_authority_check(self, proof):
+        """Internal typed completion transaction only; public validators stay strict."""
+        from .authority import MAX_AUTHORITY_CHECKS, validate_anchor
+
+        self._require_entity_schema()
+        previous = self.authority_high_water()
+        row = self._connection.execute(
+            "SELECT sequence,proof_sha256 FROM authority_checks ORDER BY sequence DESC LIMIT 1"
+        ).fetchone()
+        sequence, predecessor = (row[0] + 1, row[1]) if row else (1, "")
+        if sequence > MAX_AUTHORITY_CHECKS or proof["authority_before_sha256"] != (
+            predecessor or None
+        ):
+            raise CoordinationError("Typed authority predecessor/count budget conflict")
+        validate_anchor(
+            proof["result"]["authority_high_water"], json.loads(self.binding), previous
+        )
+        self._connection.execute(
+            "INSERT INTO authority_checks VALUES (?,?,?,?)",
+            [sequence, canonical(proof), digest(proof), predecessor],
+        )
+        self._event(
+            "authority_initialized" if previous is None else "authority_checked",
+            "dataset",
+            proof["observed_at"],
+            {"proof_sha256": digest(proof)},
+        )
 
     def _record_authority_check(self, proof):
         """Internal qualified-verifier seam; no public caller-supplied anchor setter."""
@@ -717,6 +1180,9 @@ class Ledger:
             MAX_HISTORY_BYTES,
             validate_completion_proof,
         )
+        from .maintenance import history
+
+        operations = history(self)
 
         first = self._connection.execute("SELECT first_hour FROM metadata").fetchone()[
             0
@@ -778,6 +1244,18 @@ class Ledger:
                     validate_completion_proof(
                         proof, run, json.loads(self.binding), self.ledger_id
                     )
+                    from .intentional_retry import validate_completion_link
+
+                    validate_completion_link(self, run_id, proof)
+                    if proof.get("recovery") is not None:
+                        recovery = proof["recovery"]
+                        item = operations.get(recovery["receipt"]["maintenance_id"])
+                        if (
+                            item is None
+                            or item["receipt"] != recovery["receipt"]
+                            or item["finished"] != recovery["finished"]
+                        ):
+                            raise ValueError
                     audit = self._connection.execute(
                         "SELECT observed_at,details_json FROM events "
                         "WHERE kind='writer_completed' AND identity=? LIMIT 2",
@@ -795,6 +1273,33 @@ class Ledger:
                             ),
                         )
                     ]:
+                        raise ValueError
+                    unresolved = self._connection.execute(
+                        "SELECT count(*) FROM events WHERE kind='writer_unresolved' AND identity=?",
+                        [run_id],
+                    ).fetchone()[0]
+                    recovered = self._connection.execute(
+                        "SELECT observed_at,details_json FROM events WHERE kind='writer_recovered' AND identity=? LIMIT 2",
+                        [run_id],
+                    ).fetchall()
+                    if unresolved:
+                        if (
+                            unresolved != 1
+                            or len(recovered) != 1
+                            or recovered[0][0] != proof["completed_at"]
+                        ):
+                            raise ValueError
+                        recovery = json.loads(recovered[0][1])
+                        if (
+                            set(recovery)
+                            != {"reason", "confirmed_cannot_resume", "proof_sha256"}
+                            or recovery["confirmed_cannot_resume"] is not True
+                            or recovery["proof_sha256"] != sha256
+                            or canonical(recovery) != recovered[0][1]
+                        ):
+                            raise ValueError
+                        _validate_block_reason(recovery["reason"])
+                    elif recovered:
                         raise ValueError
                     if proof["authority_proof"] is not None:
                         retained = self._connection.execute(
@@ -822,7 +1327,7 @@ class Ledger:
         ):
             raise CoordinationError("Completion history/run/cursor conflict")
 
-    def _complete_writer(self, proof):
+    def _complete_writer(self, proof, *, _recovery=None):
         """Internal fresh adapter seam, not a public report-to-permission API."""
         from .completion import MAX_COMPLETED_RUNS, validate_completion_proof
 
@@ -832,13 +1337,17 @@ class Ledger:
             with self._transaction(kind="completion"):
                 state = self.snapshot()
                 run = self.writer_run(proof["run_id"])
+                recovering = _recovery is not None and getattr(
+                    self, "_completion_recovery", None
+                ) == (proof["run_id"], _recovery)
                 if (
-                    self._completion_live_run != proof["run_id"]
-                    or state["mode"] != "WRITING"
+                    (not recovering and self._completion_live_run != proof["run_id"])
+                    or (_recovery is not None and not recovering)
+                    or state["mode"] != ("BLOCKED" if recovering else "WRITING")
                     or state["active_run_id"] != proof["run_id"]
                     or state["readers"]
                     or run is None
-                    or run["state"] != "INTENT"
+                    or run["state"] != ("BLOCKED" if recovering else "INTENT")
                     or state["next_hour"] != run["hour_start"]
                     or self.authority_high_water() != proof["authority_before"]
                 ):
@@ -848,6 +1357,9 @@ class Ledger:
                 validate_completion_proof(
                     proof, run, json.loads(self.binding), self.ledger_id
                 )
+                from .intentional_retry import validate_completion_link
+
+                validate_completion_link(self, proof["run_id"], proof)
                 row = self._connection.execute(
                     "SELECT sequence,proof_sha256 FROM completion_evidence ORDER BY sequence DESC LIMIT 1"
                 ).fetchone()
@@ -886,11 +1398,24 @@ class Ledger:
                         "mode": proof["mode"],
                     },
                 )
+                if recovering:
+                    _validate_block_reason(_recovery)
+                    self._event(
+                        "writer_recovered",
+                        proof["run_id"],
+                        proof["completed_at"],
+                        {
+                            "reason": _recovery,
+                            "confirmed_cannot_resume": True,
+                            "proof_sha256": digest(proof),
+                        },
+                    )
             if proof["authority_proof"] is not None:
                 self._authority_checked = digest(proof["authority_proof"])
             return self.snapshot()
         finally:
             self._completion_live_run = None
+            self._completion_recovery = None
 
     def _require_entity_authority(self):
         if json.loads(self.binding)["entity"] is None:
@@ -907,6 +1432,25 @@ class Ledger:
     def _block_unresolved_writer(self):
         state = self.snapshot()
         if state["mode"] != "WRITING":
+            return
+        if (
+            self._connection.execute("SELECT schema_version FROM metadata").fetchone()[
+                0
+            ]
+            == 5
+            and self._connection.execute(
+                "SELECT count(*) FROM entity_runs WHERE run_id=?",
+                [state["active_run_id"]],
+            ).fetchone()[0]
+        ):
+            from .entity_intent import block_entity
+
+            block_entity(
+                self,
+                state["active_run_id"],
+                _now(),
+                "Unresolved committed entity intent; preserve originals and require audited recovery",
+            )
             return
         reason = "Unresolved committed writer intent; confirm original child stopped and reconcile all phases"
         self.block_writer(state["active_run_id"], _now(), reason)
@@ -929,6 +1473,16 @@ class Ledger:
             if state["mode"] != "WRITING" or state["active_run_id"] != run_id:
                 raise CoordinationError(
                     "Only the active committed writer intent may be blocked"
+                )
+            if (
+                self._connection.execute(
+                    "SELECT count(*) FROM compaction_runs WHERE run_id=? AND state='INTENT'",
+                    [run_id],
+                ).fetchone()[0]
+                != 1
+            ):
+                raise CoordinationError(
+                    "Raw writer blocking cannot resolve typed entity ownership"
                 )
             self._connection.execute(
                 "UPDATE dataset_state SET mode='BLOCKED',block_reason=? WHERE singleton=1",
@@ -1001,7 +1555,7 @@ class Ledger:
                     )
                 self._ingest(payload, now)
 
-    def _ingest(self, payload, now):
+    def _ingest(self, payload, now, *, operator_recovery=False):
         # Decode the frozen canonical payload, never retain caller-owned state.
         message = decode_message(payload.encode())
         if canonical(message["binding"]) != self.binding:
@@ -1058,7 +1612,14 @@ class Ledger:
         self._connection.execute(
             "UPDATE outbox SET state='SUPPRESSED' WHERE job_id=?", [job_id]
         )
-        self._event(kind, job_id, now, {"request_sha256": message["request_sha256"]})
+        details = {"request_sha256": message["request_sha256"]}
+        if operator_recovery:
+            if kind != "cancellation":
+                raise CoordinationError(
+                    "Operator recovery cannot invent a reader outcome"
+                )
+            details.update(operator_recovery=True, terminal_sha256=digest(message))
+        self._event(kind, job_id, now, details)
 
     def admit(self, now, *, limit=1000):
         timestamp(now)

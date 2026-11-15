@@ -338,6 +338,8 @@ def _validate_result(result):
         result["exit_code"] is not None or not result["children_stopped"]
     ):
         raise CoordinationError("Invalid failed-launch observation")
+    if result["status"] == "shutdown_uncertain" and result["children_stopped"]:
+        raise CoordinationError("Uncertain shutdown cannot assert stopped children")
     for name in ("stdout", "stderr"):
         info = result[name]
         if (

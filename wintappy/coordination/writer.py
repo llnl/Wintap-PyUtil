@@ -19,7 +19,7 @@ def execute_prepared(ledger, prepared, now):
     return report
 
 
-def _execute_prepared(ledger, prepared, now):
+def _execute_prepared(ledger, prepared, now, *, on_intent=None):
     receipt = recheck_execution(prepared, ledger)
     environment = execution_environment(prepared)
     execution = {
@@ -31,32 +31,11 @@ def _execute_prepared(ledger, prepared, now):
         ledger.begin_writer(
             receipt["hour_start"], now, list(prepared.command), execution=execution
         )
+        if on_intent is not None:
+            on_intent()
         # Receipt loss after COMMIT cannot authorize an invocation or retry.
         receipt = recheck_execution(prepared, ledger)
-        settings = receipt["settings"]
-        _mkdir(Path(settings["temp_directory"]))
-        if settings["storage"] and settings["storage"]["extension_directory"]:
-            _mkdir(Path(settings["storage"]["extension_directory"]))
-        result = run_supervised(
-            list(prepared.command),
-            receipt["observations_directory"],
-            timeout_seconds=settings["supervision_timeout_seconds"],
-            stop_grace_seconds=settings["stop_grace_seconds"],
-            shutdown_seconds=settings["shutdown_seconds"],
-            max_log_bytes=settings["max_log_bytes"],
-            cwd=receipt["cwd"],
-            env=environment,
-        )
-        recheck_execution(prepared, ledger)
-        if (
-            result.get("status") != "exited"
-            or result.get("exit_code") != 0
-            or result.get("children_stopped") is not True
-        ):
-            raise CoordinationError("Writer execution did not establish clean shutdown")
-        report = read_report(
-            receipt["observations_directory"], max_bytes=settings["max_report_bytes"]
-        )
+        report = _launch_prepared(ledger, prepared, environment)
     except BaseException as error:
         state = ledger.snapshot()
         if state["mode"] == "WRITING" and state["active_run_id"] == receipt["run_id"]:
@@ -73,7 +52,39 @@ def _execute_prepared(ledger, prepared, now):
     return report
 
 
-def execute_and_complete_prepared(ledger, prepared, now, *, clock):
+def _launch_prepared(ledger, prepared, environment):
+    """Internal launch of this session's committed intent; never commit or resume."""
+    receipt = recheck_execution(prepared, ledger)
+    state = ledger.snapshot()
+    if state["mode"] != "WRITING" or state["active_run_id"] != receipt["run_id"]:
+        raise CoordinationError("Launch requires the exact committed live intent")
+    settings = receipt["settings"]
+    _mkdir(Path(settings["temp_directory"]))
+    if settings["storage"] and settings["storage"]["extension_directory"]:
+        _mkdir(Path(settings["storage"]["extension_directory"]))
+    result = run_supervised(
+        list(prepared.command),
+        receipt["observations_directory"],
+        timeout_seconds=settings["supervision_timeout_seconds"],
+        stop_grace_seconds=settings["stop_grace_seconds"],
+        shutdown_seconds=settings["shutdown_seconds"],
+        max_log_bytes=settings["max_log_bytes"],
+        cwd=receipt["cwd"],
+        env=environment,
+    )
+    recheck_execution(prepared, ledger)
+    if (
+        result.get("status") != "exited"
+        or result.get("exit_code") != 0
+        or result.get("children_stopped") is not True
+    ):
+        raise CoordinationError("Writer execution did not establish clean shutdown")
+    return read_report(
+        receipt["observations_directory"], max_bytes=settings["max_report_bytes"]
+    )
+
+
+def execute_and_complete_prepared(ledger, prepared, now, *, clock, on_intent=None):
     """Qualified normal success under one lock; never resolve an existing blocked run.
 
     Requires an evolving UTC clock. No caller-provided report, callback or verifier
@@ -101,7 +112,7 @@ def execute_and_complete_prepared(ledger, prepared, now, *, clock):
             grace_minutes=receipt["settings"]["grace_minutes"],
         ):
             raise CoordinationError("Selected completion hour is not due")
-        _execute_prepared(ledger, prepared, now)
+        _execute_prepared(ledger, prepared, now, on_intent=on_intent)
         ledger._completion_live_run = receipt["run_id"]
         observed.observe()
         return _complete_live_prepared(ledger, prepared, observed)

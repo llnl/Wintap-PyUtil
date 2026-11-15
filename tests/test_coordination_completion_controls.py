@@ -134,6 +134,11 @@ def test_three_real_completed_hours_validate_across_instrumented_two_row_pages(
         original, pages = ledger._connection, []
 
         class TwoRowPages:
+            def cursor(self):
+                # Maintenance history needs an independent cursor so nested run/
+                # proof queries cannot clobber its bounded fetchmany iteration.
+                return original.cursor()
+
             def execute(self, sql, *args):
                 if sql.startswith("SELECT * FROM completion_evidence WHERE sequence>"):
                     pages.append(args[0][0])
@@ -193,7 +198,7 @@ def test_v2_schema_fixture_preserves_genuine_authority_proof_and_reader_reservat
             )
         }
         events = ledger._connection.execute(
-            "SELECT * FROM events WHERE kind <> 'completion_history_initialized'"
+            "SELECT * FROM events WHERE kind NOT IN ('completion_history_initialized','retry_history_initialized')"
         ).fetchall()
     legacy = tmp_path / "legacy-state"
     legacy.mkdir()

@@ -15,7 +15,13 @@ def transport():
     from wintappy.coordination.protocol import MessageStore
 
     client = FakeS3()
-    return client, MessageStore("s3://synthetic-bucket/coordination", client)
+    store = MessageStore("s3://synthetic-bucket/coordination", client)
+    store.transport_scope = {
+        "endpoint_url": "https://synthetic.invalid",
+        "region": "synthetic-region",
+        "addressing_style": "path",
+    }
+    return client, store
 
 
 def tick(tmp_path, store, now=NOW, writer=None):

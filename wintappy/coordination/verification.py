@@ -201,7 +201,7 @@ def _read(path, budget):
             os.close(descriptor)
 
 
-def _observations(directory, receipt, command):
+def _observations(directory, receipt, command, *, successful=True):
     settings = receipt["settings"]
     manifest = {
         "command": list(command),
@@ -218,7 +218,7 @@ def _observations(directory, receipt, command):
         recorded != manifest
         or supervision["command_sha256"] != digest(manifest)
         or supervision["status"] != "exited"
-        or supervision["exit_code"] != 0
+        or supervision["exit_code"] != (0 if successful else 2)
         or supervision["children_stopped"] is not True
     ):
         raise CoordinationError(
@@ -239,12 +239,12 @@ def _observations(directory, receipt, command):
             or hashlib.sha256(captured).hexdigest() != info["sha256"]
         ):
             raise CoordinationError("Verification capture changed or exceeds budget")
-        if stream == "stdout":
+        if stream == "stdout" or not payload:
             payload = captured
     return supervision, hashlib.sha256(raw).hexdigest(), _parse_json(payload)
 
 
-def verify_prepared(ledger, prepared):
+def verify_prepared(ledger, prepared, *, recovery=None):
     """Invoke a fresh standalone verifier under exclusion; never reopen or advance."""
     try:
         receipt = recheck_execution(prepared, ledger)
@@ -276,7 +276,10 @@ def verify_prepared(ledger, prepared):
                 "Entity completion requires explicitly initialized ledger high-water"
             )
         original = _observations(
-            Path(receipt["observations_directory"]), receipt, prepared.command
+            Path(receipt["observations_directory"]),
+            receipt,
+            prepared.command,
+            successful=recovery is None,
         )
         if (
             original[2].get("run_id") != receipt["cli_run_id"]
@@ -291,6 +294,15 @@ def verify_prepared(ledger, prepared):
             "intent_sha256": run["intent_sha256"],
             "authority_high_water": high_water,
         }
+        if recovery is not None:
+            request.update(
+                version=3,
+                repair_run_id=recovery["receipt"]["cli_run_id"],
+                repair_coordinator_run_id=recovery["receipt"]["maintenance_id"],
+                repair_replace_checkpoints=recovery["receipt"]["replace_checkpoints"],
+            )
+            if recovery["receipt"]["operation"] == "deletions-repair":
+                request.update(version=4, repair_operation="deletions-repair")
         directory = prepared.path.parent / "verifications" / uuid4().hex
         _mkdir(directory)
         request_path = directory / "request.json"
@@ -348,6 +360,13 @@ def verify_prepared(ledger, prepared):
             "checkpoint_sha256": None,
             "checkpoint_generation_id": None,
         }
+        if recovery is not None:
+            expected["repair_run_id"] = recovery["receipt"]["cli_run_id"]
+            expected["repair_coordinator_run_id"] = recovery["receipt"][
+                "maintenance_id"
+            ]
+            if recovery["receipt"]["operation"] == "deletions-repair":
+                expected["repair_operation"] = "deletions-repair"
         if entity:
             from .authority import validate_anchor
 
@@ -372,6 +391,11 @@ def verify_prepared(ledger, prepared):
                 "raw_source_rows",
                 "raw_output_rows",
             }
+            | (
+                {"repair_archive_sha256", "repair_archive_records"}
+                if recovery is not None
+                else set()
+            )
             or any(
                 result[k] != v or type(result[k]) is not type(v)
                 for k, v in expected.items()
@@ -389,10 +413,26 @@ def verify_prepared(ledger, prepared):
             or result["raw_source_rows"] != result["raw_output_rows"]
         ):
             raise CoordinationError("Independent verification evidence count mismatch")
+        if recovery is not None and (
+            type(result["repair_archive_records"]) is not int
+            or not (
+                4 <= result["repair_archive_records"] <= 10_000
+                if recovery["receipt"]["operation"] == "deletions-repair"
+                else result["repair_archive_records"] == 5
+            )
+            or not isinstance(result["repair_archive_sha256"], str)
+            or not re.fullmatch(r"[a-f0-9]{64}", result["repair_archive_sha256"])
+        ):
+            raise CoordinationError(
+                "Independent repair archive identity/count mismatch"
+            )
         if (
             recheck_execution(prepared, ledger) != receipt
             or _observations(
-                Path(receipt["observations_directory"]), receipt, prepared.command
+                Path(receipt["observations_directory"]),
+                receipt,
+                prepared.command,
+                successful=recovery is None,
             )
             != original
             or _read(request_path, 1024 * 1024) != canonical(request).encode()

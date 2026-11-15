@@ -132,6 +132,18 @@ entity mode is enabled, an empty metrics override uses the default sibling root.
 S3 input requires explicit `WINTAP_DBT_START_DAY` and `WINTAP_DBT_END_DAY`.
 No local `raw_sensor/` placeholder or downloaded copy is required for S3:
 
+**Linux coordination integration:** Make's source/build/test/docs/debug targets now
+route active S3 inputs through the shared-reader client. Set the exact matching
+`WINTAP_COORDINATION_DATASET_ID`, separate `WINTAP_COORDINATION_ROOT`, and a local
+`WINTAP_COORDINATION_CLIENT_STATE` directory before these targets. The build keeps
+source preflight and DBT execution inside one grant; direct local inputs still run
+ordinary DBT without initializing coordination. See
+[Linux setup and limits](../wintappy/coordination/LINUX.md).
+The S3 settings below configure data access only, not the required coordinator.
+Actual endpoint/resource qualification and partial-run recovery remain open; do not
+install production scheduling. Native-Mac coordinated readers refuse until their
+separate shutdown backend is qualified; local DBT is unaffected.
+
 ```sh
 export WINTAP_DATA_ROOT="$HOME/wintap-analysis/rhel8"
 export WINTAP_DBT_DATASET="$WINTAP_DATA_ROOT"

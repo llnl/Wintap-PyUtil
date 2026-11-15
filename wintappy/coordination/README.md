@@ -1,8 +1,45 @@
 # Coordination libraries (implementation slices)
 
-This is a **library prototype**, not a running coordination service. The controlled-
-clock admission/draining tick and Linux command-tree supervision exist; there is
-no production scheduler/CLI, DBT client wrapper or operator recovery command yet.
+The Linux `service` CLI and durable reader wrapper now integrate the existing
+libraries. **Actual S3, representative resources, native-Mac shutdown and partial-run
+recovery remain qualification/implementation gates; do not enable production cron.**
+Read [Linux integration](LINUX.md) for current commands and limits. Library-slice
+history below retains its original scope; references to missing integration describe
+those historical revisions, not the current Linux service.
+Current Linux audited recovery supports operator reader cancellation, fresh
+clean-original-hour resolution and exact checkpoint-publication repair for an
+already blocked entity/deletion writer. Repair alone keeps the original block;
+resolution retains original exit-2 evidence plus a separate authenticated repair.
+Failed/crashed maintenance requires audited cannot-resume abandonment before another
+attempt. Missing migration/deletion evidence, unresolved entity publication and
+general entity maintenance remain unsupported. The provisional Linux intentional-
+retry path below has closed local regressions; endpoint/resource qualification stays open.
+Local maintenance/recovery checks pass 32 tests, standalone repaired/verifier checks
+pass 66, and nine later CLI/crash/replacement/history checks pass on intermediate
+revisions. Full standalone now passes 460 tests/two skips on the 261-identity freeze;
+affected main finishes with 303 passes/one missing-cursor test-wrapper failure.
+The wrapper-only paging/corruption repair passes; combined rerun passes 304 tests
+in 715.34 s with all 261 identities unchanged after notification. Full main passes
+755 tests/three skips in 1156.34 s, with the complete report inspected and all 261
+identities unchanged after notification. These counts are not
+full Linux acceptance. Commands and limits are in [LINUX.md](LINUX.md).
+The subsequent original-bound `repair-deletions` slice passes local regressions: it validates
+retained original migrations and unchanged survivors/outputs, never replays entities
+and retains original exit 2 plus separate disposition records. Repair preserves the
+block; independent `resolve-hour --maintenance-id` is a separate atomic transition.
+Public completion/authority verification stays one-hour-only. Separate frozen deletion
+focuses pass 33 main / 49 standalone tests, with complete reports inspected and all
+265 identities unchanged after notifications. Affected standalone passes 203 tests
+in 177.37 s; full standalone passes 509 tests/two opt-in S3 skips in 274.88 s.
+Both complete reports are inspected and all 265 identities match after notifications.
+Affected main passes 515 tests/one explicit isolated-local migration skip in 1345.33 s,
+with complete report inspected and all identities unchanged. Full main passes 788
+tests/three skips in 1492.66 s; complete report inspected and all 265 identities
+unchanged after notification. This closes deletion's local regression gate, not
+Linux/endpoint/resource qualification. Retain this baseline and require separate
+evidence for subsequent retry/entity-maintenance changes. Scoped source/test/wiki/privacy audits and
+Ruff lint/format pass separately. The reader/checkpoint counts
+above do not cover this subsequent slice.
 Receipt-bound launch, separate read-only verification and entity-authority
 initialization/freshness checks are tested on local synthetic data. The new ledger-v3
 retained-history/normal-completion prototype passes hardened local entity, history,
@@ -11,7 +48,7 @@ crash, compatibility and secret controls. Final combined coordination focus pass
 standalone tests (two skips) on the unchanged revision.
 This is not service or endpoint acceptance.
 They are not qualified for actual-endpoint scheduling. The existing
-local-only `make dbt-build` path is unchanged. Do not enable a production cron job
+local-only `make dbt-build` path remains direct. Do not enable a production cron job
 or treat these modules as dataset-wide fencing.
 
 ## Protocol
@@ -42,7 +79,7 @@ roots; the server and future client must apply this before using a transport.
 
 ## Server-local authority
 
-`Ledger.initialize` explicitly creates a new version-three DuckDB ledger with its
+`Ledger.initialize` now explicitly creates a version-four DuckDB ledger with its
 immutable dataset binding and first unfinished UTC hour. `Ledger.open` refuses a
 missing/corrupt/incompatible ledger; it cannot automatically initialize or promote
 a backup. Both take the same nonblocking `fcntl.flock` on a persistent
@@ -50,7 +87,7 @@ a backup. Both take the same nonblocking `fcntl.flock` on a persistent
 it. The context remains locked through any caller-managed external effects.
 
 `Ledger.upgrade(..., confirmed=True, reason=...)` explicitly upgrades a compatible
-v1/v2 ledger under that same lock. It preserves the ledger/dataset identity, cursor,
+v1/v2/v3 ledger under that same lock. It preserves the ledger/dataset identity, cursor,
 reader reservations, grant outbox, terminal tombstones, audits and writer identities.
 Unresolved intents become/stay `BLOCKED`; no execution or completion evidence is
 manufactured. Ordinary open does not upgrade, and missing/corrupt/mismatched or
@@ -101,12 +138,163 @@ The new `writer.execute_and_complete_prepared(..., clock=...)` prototype obtains
 fresh independent evidence internally before one completion-evidence/run/optional-
 authority/exact-hour-cursor/backlog-mode COMMIT. It requires an uninterrupted clean
 live intent under the same lock. Local hardening, combined coordination focus
-and full local regressions pass; service integration remains pending.
+and full local regressions pass; the uncommitted Linux service uses this adapter,
+with endpoint/resource qualification still pending.
 `execute_prepared` still blocks every outcome, and every previously blocked/restarted
 intent requires explicit
-audited recovery, whose command is not implemented. Exit zero or a PID check is not
-completion evidence. Checksums cannot detect a coherent rollback of the entire ledger/store;
+audited recovery through the Linux service's narrow supported operations. Exit zero
+or a PID check is not completion evidence. Checksums cannot detect a coherent
+rollback of the entire ledger/store;
 restore/recovery requires external exclusion and independent retained evidence.
+
+`retry.verify_retry_prepared` is a separate **read-only prerequisite**, not an
+operator retry command or permission transition. It authenticates the exact blocked
+original's exit-2 failed merge and stopped-child capture, publishes an exact request
+before supervising standalone DuckDB 2.0.0 verification, and rechecks original
+receipt/intent/archive/captures and request/result evidence. Scope is deliberately
+one raw-only event/hour, deletion disabled, unchanged original inputs and absent
+output. The standalone verifier rechecks hashes and both prefixes after data
+observations. The failed original, cursor, ledger history and admission block remain
+unchanged. Main requires the independently reported source rows/files/bytes to match
+bounded original migration-intent totals authenticated by the original failure
+capture; main reads JSON only, not current data SQL. This API supplies no durable
+retry or general entity-maintenance permission. Separate preflight hardening passes 33 main/45 standalone frozen
+controls. On the unchanged 269-identity revision, affected main passes 548 tests/one
+isolated-local migration opt-in skip, affected standalone passes 248, and full
+standalone passes 554/two opt-in S3 skips. Full main passes 821/three skips. Complete
+reports and all identities are checked after notifications; each full began only
+after its own affected checks. This closes the read-only preflight local regression
+gate; retain that baseline for separate durable retry/entity work. These local gates
+do not supersede the accepted deletion baseline or
+qualify retry permission, actual S3, resources or native-Mac shutdown.
+
+The active successor adds `intentional_retry.retry_and_complete_prepared` and Linux
+`service retry-hour`. After human confirmation that original processes cannot resume,
+fresh independent verification under one uninterrupted ledger lock may atomically
+commit a bounded predecessor-linked disposition plus a new receipt-bound owner. The
+failed original remains exactly `BLOCKED`, with no original completion, cursor change
+or admission-open interval. A distinct post-COMMIT/pre-launch observation and equal
+original/new migration identities are required; normal completion and audited
+resolution share these checks. Uncertain retries remain blocked and cannot resume
+automatically. Frozen ephemeral credentials are reused under the original storage
+scope; no secret is retained. Public verification remains one-hour-only.
+
+The repaired pre-freeze run passes 42 genuine retry/compatibility/service controls;
+corrected retained-history/exclusion controls pass 13 and actual v3 upgrade crash/
+lost-ack controls pass three; local frozen-credential controls pass two. A separate
+275-identity successor freeze is created/checked. Frozen standalone focus passes 45
+and affected passes 248; main focus passes 119, with unchanged identities after each
+result. Standalone full passes 554/two opt-in S3 skips with unchanged identities.
+Main affected passes 607/one isolated-local migration opt-in skip with unchanged
+identities; full main passes 880/three opt-in skips with unchanged identities.
+Complete reports and each runtime's prerequisite checks pass, closing the combined
+intentional-retry local gate. Retain the 275-identity freeze/reports before separate
+entity-only work with its own controls/regressions. Linux acceptance is not claimed.
+Entity-only ownership remains separate and
+unimplemented. See [LINUX.md](LINUX.md) before any isolated qualification; no production
+cron, remote dataset mutation or grant expiry is authorized.
+
+Separate entity-only ownership has 22 lint/format-clean controls, all red at the
+missing execution API (35.05 s); report/failed fixtures are retained and all accepted
+275 identities match. The four child crash controls have not reached their boundaries.
+No coordinated init/replay permission exists. Distinct receipts/verifier/ownership
+and original-bound non-mutation/authority/checkpoint evidence remain required; public
+one-hour compaction/authority validators stay strict.
+
+Standalone entity-verifier first run retains 64 missing-module failures (29.53 s),
+with complete report inspection and all 275 accepted identities unchanged. Genuine
+original fixtures exist, but no verifier control passes. Distinct receipts retain
+26 first-red failures (0.51 s); new bounded receipt preparation passes 26 controls
+(6.16 s), with complete report inspection, fresh lint/format and unchanged accepted
+identities. Separate standalone verifier passes its initial 64 controls (36.47 s),
+with complete report and accepted-identity checks. Corrected review red retains 21
+failures/two passes (6.94 s), with complete report/identity checks. Verifier-only
+streaming SQL, original-hour, early-configuration and historical-publication repairs
+are unqualified. Both repair reruns retain 12 failures/75 passes (35.57 s / 35.77 s),
+with complete report/identity checks. Bounded one-record SQL staging avoids the UDF's
+missing optional NumPy dependency without runtime-lock changes. Fresh five-target
+lint/format passes. Expanded first red retains 35 failures/9 passes (20.71 s), with
+complete report/identity review. Repaired Inventory-count defect; combined run passes
+131 controls (91.07 s). Ten expanded controls retain five fixture failures/five passes;
+fixture-only legacy Unicode-selection/SQL-order corrections pass ten (8.49 s), with
+complete report/identity checks. Fresh five-target lint/format passes; distinct expanded
+combined rerun passes 141 controls (97.91 s), with complete report/identity checks.
+Standalone verifier focused evidence is closed; durable publication authentication
+and entity ownership remain missing. Latest explicit-v5 controls retain seven unsupported-argument failures
+(35.10 s); post-verifier ownership rerun retains 22 missing-module failures (44.08 s).
+Complete reports reviewed, failed fixtures preserved and all 275 accepted identities
+unchanged before implementation; no upgrade or entity crash boundary executes.
+Preparation grants no launch permission. Public one-hour validators stay strict.
+
+Explicit confirmed `Ledger.upgrade(..., target_version=5)` now stages separate
+entity-run/evidence tables. Defaults remain v4; ordinary open never migrates. Source
+validation and one actual upgrade COMMIT preserve original rows/proof bytes/cursor.
+Seven actual v4 crash/lost-ack controls pass (36.93 s); expanded compatibility passes
+37 (48.43 s), complete reports reviewed. New entity history deliberately refuses
+nonempty records at schema closure, before the focused-only typed overlay. Schema selection does not confer
+launch/completion permission or a fresh authority token. The 43-control genuine-history
+focus passes (109.80 s), complete report reviewed and all 286 identities match.
+Existing-ledger first compatibility retains two failures/149 passes (401.75 s),
+complete report/identities reviewed. Actual COMMIT/lost-ack/row checks precede the
+repeat-upgrade diagnostic mismatch; later assertions did not execute. Only original
+default-v4 refusal wording is restored, retaining tests, semantics and opt-in-v5
+wording. Failed fixtures remain preserved. Separate 286-identity repair freeze binds
+repaired 46-control focus/151-control compatibility runs. Focus passes 46 (127.49 s),
+complete report reviewed and all 286 repair identities match; compatibility passes 151
+(399.51 s), complete report/identities reviewed. Schema compatibility is closed, not
+entity permission or successor full gates. Main-side observation authentication comes
+before typed ownership/history. Preserve both schema freezes and original failures.
+At schema closure only `ledger.py` differed from the accepted retry baseline; later
+input-adapter additions are separate source work.
+
+New main-side `entity_verification.py` is a read-only input-observation sub-slice,
+not ownership or completion. It requires owner-free explicitly upgraded v5 exclusion,
+zero readers, bound receipts and actual canonical single-link request/command/capture/
+shutdown evidence. Prior observations are rechecked before a fresh unchanged-input
+verification; no main data SQL, dataset/ledger-row mutation, authority initialization,
+cursor movement or reader admission is added. Result/request/proof budgets are
+64 KiB/1 MiB/128 KiB, refusing rather than pruning. Twenty-one controls retain their
+missing-module first red (16.90 s), complete report/identity review done. First adapter
+rerun retains one command-byte acceptance failure/20 passes (65.77 s), fully reviewed.
+Exact command/shutdown-byte rechecks and six further artifact controls pass 27
+(83.28 s), complete report reviewed and all 288 artifact-repair identities match.
+Artifact focus is closed, not broader input qualification or successor full gates.
+Failed fixtures remain preserved. All 286 schema-repair
+identities remained unchanged at input-focus closure. The later typed overlay has
+focused evidence only; durable original-generation publication/completion has no permissive fallback.
+Separate expanded qualification adds 31 controls for genuine mixed-hour inputs, actual
+committed exclusion/competing processes, exact contracts, clocks and budgets. First
+run retains nine failures/22 passes (102.92 s), complete report reviewed and all 289
+identities match before repair. Missing exact hour/aggregate equality and late clock
+refusal are repaired only in the adapter, preserving all controls and other 288
+identities. Combined rerun passes 58 (185.12 s); complete report reviewed and all 289
+contract-repair identities match. Main-side input-authentication focus is closed; no
+input-focus test remains active. Explicit-v5 typed intent/restart-exclusion is separate,
+not entity launch/completion/publication or successor-regression acceptance. No input
+dictionary alone can authorize typed ownership or publication.
+
+The separate `entity_intent.py` prototype now commits explicit-v5 typed exclusion
+only, retaining original receipt/input observations and upgrade/authority identities.
+An acknowledged same-session original-bound input check grants no entity launch;
+failed checks/reopen/lost acknowledgment retain BLOCKED ownership without moving the
+raw cursor or authority. Entity completion/publication/recovery history still refuses.
+First 34-control run retains import-masked failures (47.41 s), full report/290 identities
+reviewed; implementation retains 33 fixture-upgrade failures/one v4 pass (34.61 s),
+complete lossless report/291 identities reviewed. No typed assertions or crash-child
+launch executed in that run. Same-connection keyset paging repairs transaction visibility, with
+typed history/budget validation before owner-ID/JSON reads. A distinct unchanged
+34-control repair rerun passes (125.03 s), complete report and all 291 identities
+reviewed. Genuine typed COMMIT/restart/lost-ack/post-COMMIT input evidence is established.
+A separate staged-history/budget-before-fetch/keyset-tail/semantic run passes 24
+(79.82 s), complete report/all 292 identities reviewed, preserving repair source/
+controls. Main combined typed/input/schema/receipt/original-ledger compatibility focus
+passes 336 (884.70 s) on the unchanged successor freeze; standalone entity-verifier focus
+passes 141 (105.56 s), complete reports/all 292 identities reviewed. Exclusion-only focus
+is closed. Next add genuine main current-generation completion-observation authentication,
+without ownership/authority/cursor transitions or caller historical-publication fallback.
+Affected/full regressions
+remain separate. No entity operation launch, service integration or Linux acceptance
+is inferred.
 
 ## Controlled-clock tick
 
@@ -282,7 +470,8 @@ semantics. Completed entity proofs retain the fresh authority observation in the
 same transaction. Any pre-COMMIT uncertainty retains the original blocked intent;
 a lost acknowledgment after COMMIT retains the completed outcome. Existing blocked
 or restart-blocked intents cannot use this normal-success path and require explicit
-audited recovery, whose commands are not implemented.
+audited recovery. The current Linux commands and narrow checkpoint scope are
+documented above and in [LINUX.md](LINUX.md), not part of this historical prototype result.
 
 Ten active hardening failures precede repairs. The repaired completion/upgrade
 focus passes **46**, and independent semantics/compatibility/paging/secret controls

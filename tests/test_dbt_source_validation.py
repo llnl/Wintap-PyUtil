@@ -196,9 +196,14 @@ def test_make_s3_print_and_target_dependencies(env):
         ["make", "-n", "dbt-build"], cwd=ROOT, env=env, capture_output=True, text=True, timeout=10
     )
     assert build.returncode == 0, build.stderr
-    assert build.stdout.index("run-operation validate_raw_sensor_source") < build.stdout.index(
-        "dbt build"
-    )
+    assert "wintappy.coordination.client" in build.stdout
+    assert "dbt-build" in build.stdout
+    # Preflight and build now share one reader lifetime, not separate Make recipes.
+    from wintappy.coordination.client import _dbt_commands
+
+    commands = _dbt_commands("dbt-build", ["dbt"], "wintap_dbt")
+    assert commands[0][:3] == ["dbt", "run-operation", "validate_raw_sensor_source"]
+    assert commands[1][:2] == ["dbt", "build"]
     dashboard = subprocess.run(
         ["make", "-n", "qa-dashboard"],
         cwd=ROOT,

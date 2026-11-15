@@ -9,6 +9,8 @@ import sys
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from wintappy.coordination.inputs import effective_input_roots
+
 
 def required(env, name):
     value = env.get(name, "")
@@ -38,27 +40,6 @@ def source_type(source):
             "Unsupported raw source URI; use a local path or s3://bucket[/prefix]"
         )
     return "local"
-
-
-def effective_input_roots(env):
-    """Resolve active defaults/overrides before access setup or future coordination."""
-    source = env.get("WINTAP_DBT_RAW_SENSOR_DATASET", env.get("WINTAP_DBT_DATASET", ""))
-    if not source.strip():
-        raise ValueError("WINTAP_DBT_RAW_SENSOR_DATASET must not be empty")
-    source = source.rstrip("/")
-    roots = {
-        "raw": source + "/raw_sensor",
-        "compacted": env.get("WINTAP_DBT_COMPACTED_ROOT", "").rstrip("/")
-        or source + "/compacted",
-    }
-    entity = env.get("WINTAP_DBT_PROCESS_ENTITY_ROOT", "").rstrip("/")
-    if entity:
-        roots["entity"] = entity
-        roots["metrics"] = (
-            env.get("WINTAP_DBT_PROCESSING_METRICS_ROOT", "").rstrip("/")
-            or source + "/processing_metrics"
-        )
-    return roots
 
 
 def validate(env, output_only=False):

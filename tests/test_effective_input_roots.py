@@ -38,8 +38,19 @@ def test_make_full_local_build_ignores_unused_remote_metrics(env, tmp_path):
     env.update(WINTAP_DBT_START_DAY="20260101", WINTAP_DBT_END_DAY="20260102")
     offline_credentials(env, tmp_path)
     env["WINTAP_DBT_PROCESSING_METRICS_ROOT"] = "s3://synthetic-bucket/unused-metrics"
+    client_state = tmp_path / "unused-client-state"
+    env.update(
+        WINTAP_COORDINATION_ROOT="invalid-unused-root",
+        WINTAP_COORDINATION_CLIENT_STATE=str(client_state),
+        WINTAP_COORDINATION_DATASET_ID="invalid unused identifier",
+    )
     result = subprocess.run(
-        ["make", "dbt-build", f"DBT={sys.executable} -m dbt.cli.main"],
+        [
+            "make",
+            "dbt-build",
+            f"DBT={sys.executable} -m dbt.cli.main",
+            "DBT_UV_RUN=uv run --offline --frozen --dev",
+        ],
         cwd=ROOT,
         check=False,
         env=env,
@@ -52,7 +63,9 @@ def test_make_full_local_build_ignores_unused_remote_metrics(env, tmp_path):
     assert not (tmp_path / "input/compacted").exists()
     assert not (tmp_path / "input/process_entities").exists()
     assert "raw-sensor-compact" not in result.stdout
-    assert "coordination" not in result.stdout.lower()
+    # The router's module name is in Make's command echo, not evidence of a grant.
+    assert "terminal_pending" not in result.stdout
+    assert not client_state.exists()
 
 
 @pytest.mark.parametrize("remote", ["raw", "compacted", "entity", "metrics"])

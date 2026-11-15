@@ -233,7 +233,9 @@ def verify_authority(args, *, client=None, authority_high_water=None):
         return current[0]
 
 
-def _grammar(records, args, expected_binding):
+def _grammar(
+    records, args, expected_binding, *, repaired=False, deletion_repaired=False
+):
     run_identity(args.run_id)
     run_identity(args.coordinator_run_id)
     if args.run_id == args.coordinator_run_id or any(
@@ -324,7 +326,6 @@ def _grammar(records, args, expected_binding):
             raise CompactionError(
                 "Original migration input/schema/count intent mismatch"
             )
-        expected += ["migration_intent", "migration_verified"]
         if args.delete_source:
             deletes = [
                 r
@@ -335,15 +336,71 @@ def _grammar(records, args, expected_binding):
                 raise CompactionError(
                     "Original deletion intent/source evidence mismatch"
                 )
-    if args.delete_source:
-        expected += [p for _ in items for p in ("deletion_intent", "deletion_verified")]
+    # process_hours migrates every event in one hour, then deletes that hour,
+    # before moving to the next hour. Do not require a fictitious global phase.
+    for day, hour in dict.fromkeys((i["dayPK"], i["hourPK"]) for i in items):
+        selected = [i for i in items if (i["dayPK"], i["hourPK"]) == (day, hour)]
+        expected += [
+            p for _ in selected for p in ("migration_intent", "migration_verified")
+        ]
+        if args.delete_source:
+            expected += [
+                p
+                for item in selected
+                for p in (
+                    "deletion_intent",
+                    "deletion_uncertain"
+                    if deletion_repaired
+                    and item.get("status") == "merged_with_deletion_error"
+                    else "deletion_verified",
+                )
+            ]
     expected += ["raw_complete"]
     if args.process_entity_root:
-        expected += ["checkpoint_intent", "checkpoint_verified"]
-    expected += ["complete"]
+        expected += ["checkpoint_intent"]
+        if deletion_repaired:
+            count = sum(r["phase"] == "checkpoint_verified" for r in records)
+            if count > len(hour_window(args.start_hour, args.end_hour)):
+                raise CompactionError("Original checkpoint observations duplicated")
+            expected += ["checkpoint_verified"] * count
+        elif not repaired or any(r["phase"] == "checkpoint_verified" for r in records):
+            expected += ["checkpoint_verified"]
+    expected += ["blocked" if repaired or deletion_repaired else "complete"]
     if [r["phase"] for r in records] != expected:
         raise CompactionError("Completion archive phase order/scope is incomplete")
-    if canonical(records[-1]["data"]) != canonical(
+    if deletion_repaired:
+        terminal = records[-1]["data"]
+        if (
+            not args.delete_source
+            or raw.get("status") != "completed_with_deletion_errors"
+        ):
+            raise CompactionError(
+                "Original partial deletion failure is not established"
+            )
+        if canonical(terminal) != canonical(
+            {
+                "status": "completed_with_deletion_errors",
+                "exit_code": 2,
+                "migration_complete": False,
+            }
+        ) and not (
+            args.process_entity_root
+            and set(terminal) == {"message"}
+            and isinstance(terminal["message"], str)
+            and terminal["message"]
+        ):
+            raise CompactionError("Original deletion terminal evidence is missing")
+    elif repaired:
+        terminal = records[-1]["data"]
+        if (
+            not args.process_entity_root
+            or not args.delete_source
+            or set(terminal) != {"message"}
+            or not isinstance(terminal["message"], str)
+            or not terminal["message"]
+        ):
+            raise CompactionError("Original failed checkpoint phase is not established")
+    elif canonical(records[-1]["data"]) != canonical(
         {
             "status": "completed" if items else "empty",
             "exit_code": 0,
@@ -354,7 +411,101 @@ def _grammar(records, args, expected_binding):
     return raw
 
 
-def _checkpoint(conn, records, args, hours, expected_binding, metrics, raw):
+def _repair_grammar(
+    records,
+    original,
+    args,
+    expected_binding,
+    repair_run_id,
+    repair_coordinator_run_id,
+    replacement_authorized,
+):
+    run_identity(repair_run_id)
+    run_identity(repair_coordinator_run_id)
+    if (
+        len(
+            {
+                args.run_id,
+                args.coordinator_run_id,
+                repair_run_id,
+                repair_coordinator_run_id,
+            }
+        )
+        != 4
+        or any(r["coordinator_run_id"] != repair_coordinator_run_id for r in records)
+        or [r["phase"] for r in records]
+        != [
+            "run_intent",
+            "entities_verified",
+            "repair_intent",
+            "checkpoint_verified",
+            "complete",
+        ]
+        or canonical(records[0]["data"])
+        != canonical(
+            {
+                "binding": expected_binding,
+                "command": "checkpoints-repair",
+            }
+        )
+        or canonical(records[-1]["data"])
+        != canonical(
+            {
+                "status": "repaired",
+                "exit_code": 0,
+                "migration_complete": True,
+            }
+        )
+    ):
+        raise CompactionError("Exact checkpoint repair archive scope/order is missing")
+    rows = next(r["data"] for r in original if r["phase"] == "checkpoint_intent")[
+        "rows"
+    ]
+    intent = records[2]["data"]
+    replaced = intent.get("replaced_checkpoints")
+    if (
+        not isinstance(replaced, list)
+        or len(replaced) != len(rows)
+        or any(old is not None and not isinstance(old, dict) for old in replaced)
+    ):
+        raise CompactionError(
+            "Repair must retain the exact prior checkpoint disposition"
+        )
+    conflicts = any(
+        old is not None and canonical(old) != canonical(row)
+        for old, row in zip(replaced, rows, strict=True)
+    )
+    if conflicts and not replacement_authorized:
+        raise CompactionError(
+            "Checkpoint replacement lacks explicit receipt authorization"
+        )
+    if canonical(intent) != canonical(
+        {
+            "original_run_id": args.run_id,
+            "original_last_sha256": identity(original[-1]),
+            "replaced_checkpoints": replaced,
+            "confirmed_replacement": conflicts,
+            "rows": rows,
+        }
+    ):
+        raise CompactionError(
+            "Repair intent is not bound to original archive/candidates"
+        )
+    generation = records[1]["data"].get("generation_id")
+    _digest(generation)
+    if canonical(records[3]["data"]) != canonical(
+        {
+            "hour_start": args.start_hour,
+            "row": rows[0],
+        }
+    ):
+        raise CompactionError("Repair verification does not retain original candidates")
+    return generation
+
+
+def _checkpoint(
+    conn, records, args, hours, expected_binding, metrics, raw, *, repaired=False
+):
     candidates = next(r["data"] for r in records if r["phase"] == "checkpoint_intent")
     if set(candidates) != {"rows"} or not isinstance(candidates["rows"], list):
         raise CompactionError("Original checkpoint candidates missing")
@@ -381,11 +532,14 @@ def _checkpoint(conn, records, args, hours, expected_binding, metrics, raw):
         raise CompactionError(
             "Original checkpoint migration/generation evidence mismatch"
         )
-    observation = next(
-        r["data"] for r in records if r["phase"] == "checkpoint_verified"
-    )
+    observations = [r["data"] for r in records if r["phase"] == "checkpoint_verified"]
     if (
-        observation != {"hour_start": args.start_hour, "row": row}
+        (not repaired and not observations)
+        or any(
+            canonical(observation)
+            != canonical({"hour_start": args.start_hour, "row": row})
+            for observation in observations
+        )
         or metrics.read(conn, hours[0]) != row
     ):
         raise CompactionError(
@@ -395,11 +549,29 @@ def _checkpoint(conn, records, args, hours, expected_binding, metrics, raw):
 
 
 def verify_completion(
-    args, *, execution_sha256, supervision_sha256, authority_high_water, client=None
+    args,
+    *,
+    execution_sha256,
+    supervision_sha256,
+    authority_high_water,
+    client=None,
+    repair_run_id=None,
+    repair_coordinator_run_id=None,
+    repair_replace_checkpoints=False,
+    repair_operation="checkpoints-repair",
 ):
     """Re-read data; execution/shutdown hashes are authenticated by the adapter."""
     _digest(execution_sha256)
     _digest(supervision_sha256)
+    repaired = repair_run_id is not None
+    if (
+        repaired != (repair_coordinator_run_id is not None)
+        or type(repair_replace_checkpoints) is not bool
+        or repair_operation not in {"checkpoints-repair", "deletions-repair"}
+        or not repaired
+        and repair_operation != "checkpoints-repair"
+    ):
+        raise CompactionError("Repair requires both exact archive identities")
     try:
         with _opened(args, client) as opened:
             (
@@ -430,14 +602,82 @@ def verify_completion(
                 if root is not None:
                     separate_roots(archive_dataset, root)
             records = load_archive(str(archive_root), args.run_id)
-            _grammar(records, args, expected_binding)
+            deletion_repaired = repaired and repair_operation == "deletions-repair"
+            _grammar(
+                records,
+                args,
+                expected_binding,
+                repaired=repaired and not deletion_repaired,
+                deletion_repaired=deletion_repaired,
+            )
+            repair_records = None
+            if repaired:
+                repair_records = load_archive(str(archive_root), repair_run_id)
+                if deletion_repaired:
+                    repair_generation = (
+                        next(
+                            r["data"]["generation_id"]
+                            for r in repair_records
+                            if r["phase"] == "entities_verified"
+                        )
+                        if entities
+                        else None
+                    )
+                else:
+                    repair_generation = _repair_grammar(
+                        repair_records,
+                        records,
+                        args,
+                        expected_binding,
+                        repair_run_id,
+                        repair_coordinator_run_id,
+                        repair_replace_checkpoints,
+                    )
             # Aggregate selected-event file ceilings precede per-parent verification.
+            if deletion_repaired:
+                from .deletion_recovery import prefix_inventory
+
+                prefix_inventory(source, hours, events, limits.max_files)
+                prefix_inventory(destination, hours, events, limits.max_files)
             inputs = discover(source, hours, events, max_files=limits.max_files)
             outputs = discover(destination, hours, events, max_files=limits.max_files)
-            raw = verify_migrations(
-                conn, records, source, destination, hours, events, limits
-            )
             current, checked, checkpoint = None, None, None
+            if deletion_repaired and entities is not None:
+                _authority(
+                    conn,
+                    source,
+                    destination,
+                    entities,
+                    args,
+                    metrics,
+                    authority_high_water,
+                )
+
+            def verify_raw():
+                if deletion_repaired:
+                    from .deletion_recovery import verify_disposition
+
+                    return verify_disposition(
+                        conn,
+                        args,
+                        records,
+                        repair_records,
+                        expected_binding,
+                        source,
+                        destination,
+                        metrics,
+                        hours,
+                        events,
+                        limits,
+                        repair_run_id=repair_run_id,
+                        repair_coordinator_run_id=repair_coordinator_run_id,
+                        replacement_authorized=repair_replace_checkpoints,
+                    )
+                return verify_migrations(
+                    conn, records, source, destination, hours, events, limits
+                ), None
+
+            raw, disposition_checkpoint = verify_raw()
             if entities is not None:
                 current, checked = _authority(
                     conn,
@@ -448,10 +688,49 @@ def verify_completion(
                     metrics,
                     authority_high_water,
                 )
-                checkpoint = _checkpoint(
-                    conn, records, args, hours, expected_binding, metrics, raw
+                checkpoint = (
+                    disposition_checkpoint
+                    if deletion_repaired
+                    else _checkpoint(
+                        conn,
+                        records,
+                        args,
+                        hours,
+                        expected_binding,
+                        metrics,
+                        raw,
+                        repaired=repaired,
+                    )
                 )
-            verify_migrations(conn, records, source, destination, hours, events, limits)
+                if repaired:
+                    expected_authority = authority_binding(
+                        source,
+                        destination,
+                        entities,
+                        args.entity_host,
+                        args.unknown_identity_policy,
+                        args.unknown_identity_max_ratio,
+                        metrics.store.dataset.root,
+                    )
+                    with TemporaryDirectory(
+                        prefix="completion-repair-lineage-"
+                    ) as directory:
+                        Authority(conn, entities, directory, expected_authority)
+                        if (
+                            conn.execute(
+                                "SELECT count(*) FROM entity_authority "
+                                "WHERE generation_id=? AND status='committed'",
+                                [repair_generation],
+                            ).fetchone()[0]
+                            != 1
+                        ):
+                            raise CompactionError(
+                                "Repair generation is not in current committed lineage"
+                            )
+            if verify_raw() != (raw, disposition_checkpoint):
+                raise CompactionError(
+                    "Migration/disposition changed during independent verification"
+                )
             recheck(source, inputs, hours, max_files=limits.max_files)
             recheck(destination, outputs, hours, max_files=limits.max_files)
             if entities is not None:
@@ -467,6 +746,11 @@ def verify_completion(
                     )
             if load_archive(str(archive_root), args.run_id) != records:
                 raise CompactionError("Original archive changed during verification")
+            if (
+                repaired
+                and load_archive(str(archive_root), repair_run_id) != repair_records
+            ):
+                raise CompactionError("Repair archive changed during verification")
             result = {
                 "version": 1,
                 "status": "verified",
@@ -487,6 +771,15 @@ def verify_completion(
                 "raw_source_rows": _sum_partitions(raw, hours[0], "source_rows"),
                 "raw_output_rows": _sum_partitions(raw, hours[0], "merged_rows"),
             }
+            if repaired:
+                result.update(
+                    repair_run_id=repair_run_id,
+                    repair_coordinator_run_id=repair_coordinator_run_id,
+                    repair_archive_sha256=identity(repair_records[-1]),
+                    repair_archive_records=len(repair_records),
+                )
+                if deletion_repaired:
+                    result["repair_operation"] = repair_operation
             if len(canonical(result).encode()) > MAX_COMPLETION_BYTES:
                 raise CompactionError("Completion evidence exceeds byte budget")
             return result
@@ -562,6 +855,7 @@ def _request(path, expected_sha256):
         raise CompactionError("Completion request checksum mismatch")
     try:
         value = json.loads(payload)
+        repaired = value.get("version") in {3, 4}
         if (
             canonical(value).encode() != payload
             or set(value)
@@ -573,12 +867,32 @@ def _request(path, expected_sha256):
                 "intent_sha256",
                 "authority_high_water",
             }
+            | (
+                {
+                    "repair_run_id",
+                    "repair_coordinator_run_id",
+                    "repair_replace_checkpoints",
+                }
+                if repaired
+                else set()
+            )
+            | ({"repair_operation"} if value.get("version") == 4 else set())
             or type(value["version"]) is not int
-            or value["version"] != 1
+            or value["version"] not in {1, 3, 4}
         ):
             raise ValueError
         for field in ("execution_sha256", "supervision_sha256", "intent_sha256"):
             _digest(value[field])
+        if repaired:
+            run_identity(value["repair_run_id"])
+            run_identity(value["repair_coordinator_run_id"])
+            if type(value["repair_replace_checkpoints"]) is not bool:
+                raise ValueError
+            if (
+                value["version"] == 4
+                and value["repair_operation"] != "deletions-repair"
+            ):
+                raise ValueError
         return value, _arguments(value["arguments"])
     except CompactionError:
         raise
@@ -617,6 +931,12 @@ def main(argv=None):
                 execution_sha256=request["execution_sha256"],
                 supervision_sha256=request["supervision_sha256"],
                 authority_high_water=request["authority_high_water"],
+                repair_run_id=request.get("repair_run_id"),
+                repair_coordinator_run_id=request.get("repair_coordinator_run_id"),
+                repair_replace_checkpoints=request.get(
+                    "repair_replace_checkpoints", False
+                ),
+                repair_operation=request.get("repair_operation", "checkpoints-repair"),
             )
             result.update(
                 request_sha256=selected.request_sha256,
