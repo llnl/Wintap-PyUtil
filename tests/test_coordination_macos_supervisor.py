@@ -6,7 +6,6 @@ import signal
 import subprocess
 import sys
 import time
-from pathlib import Path
 
 import pytest
 
@@ -18,9 +17,9 @@ def command(code):
 
 
 def supervise(tmp_path, code, **kwargs):
-    from wintappy.coordination.supervisor import run_supervised
+    from wintappy.coordination.supervisor import run_reader_supervised
 
-    return run_supervised(
+    return run_reader_supervised(
         command(code),
         tmp_path / "run",
         timeout_seconds=5,
@@ -96,7 +95,7 @@ Path({str(pidfile)!r}).write_text(f'{{child.pid}} {{os.getpgid(child.pid)}}')
 
 
 def test_timeout_terminates_managed_group(tmp_path):
-    from wintappy.coordination.supervisor import run_supervised
+    from wintappy.coordination.supervisor import run_reader_supervised
 
     pidfile = tmp_path / "root.pid"
     workload = f"""
@@ -106,7 +105,7 @@ signal.signal(signal.SIGTERM,signal.SIG_IGN)
 Path({str(pidfile)!r}).write_text(str(os.getpid()))
 time.sleep(60)
 """
-    result = run_supervised(
+    result = run_reader_supervised(
         command(workload),
         tmp_path / "run",
         timeout_seconds=0.3,
@@ -121,10 +120,10 @@ time.sleep(60)
 
 
 def test_missing_executable_and_output_limit_keep_group_scope(tmp_path):
-    from wintappy.coordination.supervisor import run_supervised
+    from wintappy.coordination.supervisor import run_reader_supervised
 
-    missing = run_supervised([str(tmp_path / "absent")], tmp_path / "missing")
-    limited = run_supervised(
+    missing = run_reader_supervised([str(tmp_path / "absent")], tmp_path / "missing")
+    limited = run_reader_supervised(
         command("print('x'*10000)"),
         tmp_path / "limited",
         max_log_bytes=100,
@@ -162,7 +161,7 @@ Path({str(pidfile)!r}).write_text(str(child.pid))
 
 def test_escaped_child_holding_capture_pipe_is_uncertain_and_not_released(tmp_path):
     from wintappy.coordination.protocol import CoordinationError
-    from wintappy.coordination.supervisor import run_supervised
+    from wintappy.coordination.supervisor import run_reader_supervised
 
     pidfile = tmp_path / "escaped.pid"
     workload = f"""
@@ -174,7 +173,7 @@ Path({str(pidfile)!r}).write_text(str(child.pid))
 """
     try:
         with pytest.raises(CoordinationError, match="shutdown is uncertain"):
-            run_supervised(
+            run_reader_supervised(
                 command(workload),
                 tmp_path / "run",
                 timeout_seconds=5,
@@ -197,8 +196,8 @@ def test_caller_interruption_stops_group_and_records_shutdown(tmp_path):
     pidfile = tmp_path / "child.pid"
     caller_code = """
 import json,sys
-from wintappy.coordination.supervisor import run_supervised
-run_supervised(json.loads(sys.argv[1]),sys.argv[2],timeout_seconds=30,
+from wintappy.coordination.supervisor import run_reader_supervised
+run_reader_supervised(json.loads(sys.argv[1]),sys.argv[2],timeout_seconds=30,
                stop_grace_seconds=0.1,shutdown_seconds=2)
 """
     workload = f"""
@@ -233,8 +232,8 @@ def test_sigkill_of_wrapper_is_detected_by_worker(tmp_path):
     pidfile = tmp_path / "root.pid"
     caller_code = """
 import json,sys
-from wintappy.coordination.supervisor import run_supervised
-run_supervised(json.loads(sys.argv[1]),sys.argv[2],timeout_seconds=30,
+from wintappy.coordination.supervisor import run_reader_supervised
+run_reader_supervised(json.loads(sys.argv[1]),sys.argv[2],timeout_seconds=30,
                stop_grace_seconds=0.1,shutdown_seconds=2)
 """
     workload = f"""
@@ -281,7 +280,7 @@ def observed(*args,**kwargs):
     return process
 module.subprocess.Popen=observed
 try:
-    module.run_supervised(sys.argv[2:-1],sys.argv[-1],timeout_seconds=30,
+    module.run_reader_supervised(sys.argv[2:-1],sys.argv[-1],timeout_seconds=30,
                           stop_grace_seconds=0.1,shutdown_seconds=2)
 except CoordinationError:
     raise SystemExit(9)
@@ -331,7 +330,7 @@ def test_lost_worker_acknowledgment_retains_failed_call_even_with_receipt(tmp_pa
 
     monkeypatch.setattr(supervisor.subprocess, "Popen", LostAcknowledgment)
     with pytest.raises(CoordinationError, match="supervisor failed"):
-        supervisor.run_supervised(command("pass"), tmp_path / "run")
+        supervisor.run_reader_supervised(command("pass"), tmp_path / "run")
 
     receipt = json.loads((tmp_path / "run/supervision.json").read_text())
     assert receipt["children_stopped"] is True
@@ -343,6 +342,7 @@ def test_coordinated_reader_runs_natively_and_releases_only_group_observation(
 ):
     from wintappy.coordination.client import run_reader
     from wintappy.coordination.protocol import make_grant, make_request
+
     from .test_coordination_execution import binding
     from .test_coordination_ledger import HOUR
     from .test_coordination_tick import DUE, transport
@@ -371,7 +371,12 @@ def test_coordinated_reader_runs_natively_and_releases_only_group_observation(
 
 def test_coordinated_reader_retains_reservation_when_supervisor_ack_is_lost(tmp_path, monkeypatch):
     from wintappy.coordination import client
-    from wintappy.coordination.protocol import CoordinationError, make_grant, make_request
+    from wintappy.coordination.protocol import (
+        CoordinationError,
+        make_grant,
+        make_request,
+    )
+
     from .test_coordination_execution import binding
     from .test_coordination_ledger import HOUR
     from .test_coordination_tick import DUE, transport
@@ -379,14 +384,14 @@ def test_coordinated_reader_retains_reservation_when_supervisor_ack_is_lost(tmp_
     _, store = transport()
     request = make_request(binding(tmp_path), "a" * 32, "shared-command", HOUR, DUE, DUE)
     store.publish(make_grant(request, "b" * 32, DUE))
-    original = client.run_supervised
+    original = client.run_reader_supervised
     reader_command = command("pass")
 
     def lose_acknowledgment(*args, **kwargs):
         original(*args, **kwargs)
         raise CoordinationError("synthetic supervisor acknowledgment loss")
 
-    monkeypatch.setattr(client, "run_supervised", lose_acknowledgment)
+    monkeypatch.setattr(client, "run_reader_supervised", lose_acknowledgment)
     with pytest.raises(CoordinationError, match="acknowledgment loss"):
         client.run_reader(
             tmp_path / "clients",

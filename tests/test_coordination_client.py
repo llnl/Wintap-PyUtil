@@ -122,7 +122,7 @@ def test_uncertain_supervisor_does_not_publish_release_or_relaunch(
     def uncertain(*args, **kwargs):
         raise CoordinationError("uncertain child tree")
 
-    monkeypatch.setattr(client, "run_supervised", uncertain)
+    monkeypatch.setattr(client, "run_reader_supervised", uncertain)
     command = [sys.executable, "-c", "pass"]
     with pytest.raises(CoordinationError):
         client.run_reader(tmp_path / "clients", req, store, command, clock=lambda: DUE)
@@ -199,7 +199,7 @@ def test_shutdown_result_preserves_failure_and_safe_helper_cleanup(
     _, store = transport()
     req = request(tmp_path)
     store.publish(make_grant(req, "b" * 32, DUE))
-    original = client.run_supervised
+    original = client.run_reader_supervised
 
     def observed(command, directory, **kwargs):
         result = original(command, directory, **kwargs)
@@ -209,7 +209,7 @@ def test_shutdown_result_preserves_failure_and_safe_helper_cleanup(
         (directory / "supervision.json").write_text(canonical(result))
         return result
 
-    monkeypatch.setattr(client, "run_supervised", observed)
+    monkeypatch.setattr(client, "run_reader_supervised", observed)
     value = client.run_reader(
         tmp_path / "clients",
         req,
@@ -256,13 +256,13 @@ def test_supervised_signal_authenticates_evidence_before_release(
     _, store = transport()
     req = request(tmp_path)
     store.publish(make_grant(req, "b" * 32, DUE))
-    original = client.run_supervised
+    original = client.run_reader_supervised
 
     def interrupted(*args, **kwargs):
         original(*args, **kwargs)
         raise SystemExit(code)
 
-    monkeypatch.setattr(client, "run_supervised", interrupted)
+    monkeypatch.setattr(client, "run_reader_supervised", interrupted)
     result = client.run_reader(
         tmp_path / "clients",
         req,
@@ -283,7 +283,7 @@ def test_signal_with_missing_or_changed_shutdown_evidence_keeps_reservation(
     _, store = transport()
     req = request(tmp_path)
     store.publish(make_grant(req, "b" * 32, DUE))
-    original = client.run_supervised
+    original = client.run_reader_supervised
 
     def interrupted(command, directory, **kwargs):
         if damage != "missing":
@@ -299,7 +299,7 @@ def test_signal_with_missing_or_changed_shutdown_evidence_keeps_reservation(
             path.write_text(json.dumps(value))
         raise SystemExit(143)
 
-    monkeypatch.setattr(client, "run_supervised", interrupted)
+    monkeypatch.setattr(client, "run_reader_supervised", interrupted)
     with pytest.raises(CoordinationError):
         client.run_reader(
             tmp_path / "clients",
@@ -322,7 +322,7 @@ def test_unrelated_system_exit_never_becomes_release(tmp_path, monkeypatch):
     def unrelated(*args, **kwargs):
         raise SystemExit(0)
 
-    monkeypatch.setattr(client, "run_supervised", unrelated)
+    monkeypatch.setattr(client, "run_reader_supervised", unrelated)
     with pytest.raises(SystemExit):
         client.run_reader(
             tmp_path / "clients",
@@ -728,7 +728,7 @@ def test_contradictory_shutdown_uncertain_cannot_release(tmp_path, monkeypatch):
     _, store = transport()
     req = request(tmp_path)
     store.publish(make_grant(req, "b" * 32, DUE))
-    original = client.run_supervised
+    original = client.run_reader_supervised
 
     def contradictory(command, directory, **kwargs):
         result = original(command, directory, **kwargs)
@@ -736,7 +736,7 @@ def test_contradictory_shutdown_uncertain_cannot_release(tmp_path, monkeypatch):
         (directory / "supervision.json").write_text(canonical(result))
         return result
 
-    monkeypatch.setattr(client, "run_supervised", contradictory)
+    monkeypatch.setattr(client, "run_reader_supervised", contradictory)
     with pytest.raises(CoordinationError):
         client.run_reader(
             tmp_path / "clients",

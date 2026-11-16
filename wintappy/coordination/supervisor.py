@@ -1,11 +1,11 @@
-"""Linux subreaper and best-effort native-Mac process-group supervision.
+"""Linux subreaper and reader-scoped best-effort native-macOS supervision.
 
 Linux uses one fresh exec as an isolated subreaper; ECHILD after root exit proves
-shutdown of that descendant tree. macOS instead accepts an empty dedicated process
-group as a best-effort normal-release signal; descendants that escape the group may
-go unnoticed. This is cooperative supervision, not hostile-workload or
-external-service fencing. Uncertain shutdown, worker death or missing durable
-observations must fail closed.
+shutdown of that descendant tree. Only the coordinated-reader entry point may use
+macOS, where an empty dedicated process group is a best-effort normal-release signal;
+descendants that escape the group may go unnoticed. This is cooperative supervision,
+not hostile-workload or external-service fencing. Uncertain shutdown, worker death or
+missing durable observations must fail closed.
 """
 
 import ctypes
@@ -41,12 +41,22 @@ def _budget(value, ceiling, *, integer=False):
         raise CoordinationError("Invalid supervision budget")
 
 
-def _config(command, directory, timeout, grace, shutdown, limit, cwd, env):
-    if (
-        sys.platform not in {"linux", "darwin"}
-        or threading.current_thread() is not threading.main_thread()
-    ):
-        raise CoordinationError("Supervision requires Linux/macOS and the main thread")
+def _config(
+    command,
+    directory,
+    timeout,
+    grace,
+    shutdown,
+    limit,
+    cwd,
+    env,
+    *,
+    allow_macos_reader=False,
+):
+    if sys.platform != "linux" and not (allow_macos_reader and sys.platform == "darwin"):
+        raise CoordinationError("Supervision requires Linux")
+    if threading.current_thread() is not threading.main_thread():
+        raise CoordinationError("Supervision requires the main thread")
     if (
         not isinstance(command, list)
         or not 1 <= len(command) <= 256
@@ -54,7 +64,7 @@ def _config(command, directory, timeout, grace, shutdown, limit, cwd, env):
             not isinstance(arg, str) or not arg or len(arg) > 4096 or "\0" in arg for arg in command
         )
     ):
-        raise CoordinationError("Writer command must be a bounded argument list")
+        raise CoordinationError("Supervised command must be a bounded argument list")
     _budget(timeout, 7 * 86400)
     _budget(grace, 300)
     _budget(shutdown, 600)
@@ -130,6 +140,57 @@ def run_supervised(
     cwd=None,
     env=None,
 ):
+    """Run generic supervision; only Linux is supported outside the reader client."""
+    return _run_supervised(
+        command,
+        directory,
+        timeout_seconds=timeout_seconds,
+        stop_grace_seconds=stop_grace_seconds,
+        shutdown_seconds=shutdown_seconds,
+        max_log_bytes=max_log_bytes,
+        cwd=cwd,
+        env=env,
+        allow_macos_reader=False,
+    )
+
+
+def run_reader_supervised(
+    command,
+    directory,
+    *,
+    timeout_seconds=3600,
+    stop_grace_seconds=2,
+    shutdown_seconds=30,
+    max_log_bytes=8 * 1024 * 1024,
+    cwd=None,
+    env=None,
+):
+    """Supervise coordinated readers on Linux or via the accepted Mac backend."""
+    return _run_supervised(
+        command,
+        directory,
+        timeout_seconds=timeout_seconds,
+        stop_grace_seconds=stop_grace_seconds,
+        shutdown_seconds=shutdown_seconds,
+        max_log_bytes=max_log_bytes,
+        cwd=cwd,
+        env=env,
+        allow_macos_reader=True,
+    )
+
+
+def _run_supervised(
+    command,
+    directory,
+    *,
+    timeout_seconds=3600,
+    stop_grace_seconds=2,
+    shutdown_seconds=30,
+    max_log_bytes=8 * 1024 * 1024,
+    cwd=None,
+    env=None,
+    allow_macos_reader,
+):
     """Create one immutable local run directory and wait through tree shutdown.
 
     Environment overrides apply only to the workload, not the supervising exec;
@@ -147,6 +208,7 @@ def run_supervised(
         max_log_bytes,
         cwd,
         env,
+        allow_macos_reader=allow_macos_reader,
     )
     root = Path(config["directory"])
     try:

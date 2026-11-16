@@ -1,6 +1,8 @@
 # Native macOS coordinated reader supervision
 
-The coordinated reader client has a native macOS path. It launches an isolated
+Only the coordinated reader client may select native macOS supervision, through
+`supervisor.run_reader_supervised(...)`; the generic `run_supervised(...)` entry point
+and all writer supervision remain Linux-only. The reader path launches an isolated
 supervisor process, starts the reader command in a dedicated process group, captures
 bounded stdout/stderr, and records `shutdown_scope: "process_group"` in the immutable
 supervision observation. The worker observes wrapper exit with kqueue and enumerates

@@ -830,6 +830,7 @@ def test_unsupported_writer_supervision_refuses_launch_and_tick_stays_blocked(
     from wintappy.coordination import supervisor
     from wintappy.coordination.protocol import CoordinationError
 
+    native_platform = supervisor.sys.platform
     initialize(tmp_path)
     _, store = transport()
     store.publish(request(tmp_path))
@@ -844,9 +845,44 @@ def test_unsupported_writer_supervision_refuses_launch_and_tick_stays_blocked(
     with pytest.raises(CoordinationError, match="requires Linux"):
         supervisor.run_supervised(command, directory)
     assert not directory.exists()
+
+    monkeypatch.setattr(supervisor.sys, "platform", native_platform)
+
+    def unsupported_writer(run):
+        monkeypatch.setattr(supervisor.sys, "platform", platform)
+        try:
+            return supervisor.run_supervised(command, directory)
+        finally:
+            monkeypatch.setattr(supervisor.sys, "platform", native_platform)
+
     result = tick(
-        tmp_path, store, DUE, lambda run: supervisor.run_supervised(command, directory)
+        tmp_path, store, DUE, unsupported_writer
     )
     assert result["mode"] == "BLOCKED" and result["next_hour"] == HOUR
     assert result["waiting"] == 1 and not store.messages("grant")
     assert not directory.exists()
+
+
+def test_macos_supervision_dispatch_is_explicitly_reader_scoped(tmp_path, monkeypatch):
+    from wintappy.coordination import supervisor
+    from wintappy.coordination.protocol import CoordinationError
+
+    monkeypatch.setattr(supervisor.sys, "platform", "darwin")
+    calls = []
+
+    def observe(config, payload, root, manifest):
+        calls.append((config, payload, root, manifest))
+        return {"shutdown_scope": "process_group"}
+
+    monkeypatch.setattr(supervisor, "_run_macos_supervised", observe)
+    reader_root = tmp_path / "reader"
+    assert supervisor.run_reader_supervised([sys.executable, "-B", "-c", "pass"], reader_root) == {
+        "shutdown_scope": "process_group"
+    }
+    assert len(calls) == 1
+    assert calls[0][2] == reader_root.resolve()
+
+    writer_root = tmp_path / "writer"
+    with pytest.raises(CoordinationError, match="requires Linux"):
+        supervisor.run_supervised([sys.executable, "-B", "-c", "pass"], writer_root)
+    assert not writer_root.exists()

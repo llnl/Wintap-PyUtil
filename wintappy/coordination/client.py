@@ -42,7 +42,7 @@ from .supervisor import (
     _parse_json,
     _publish,
     _validate_result,
-    run_supervised,
+    run_reader_supervised,
 )
 
 
@@ -158,6 +158,7 @@ def _invocation(path, request):
         manifest["max_log_bytes"],
         manifest["cwd"],
         None,
+        allow_macos_reader=True,
     )
     if _manifest(config) != manifest:
         raise CoordinationError("Client invocation is not canonical")
@@ -359,6 +360,7 @@ def run_reader(
             max_log_bytes,
             cwd,
             env,
+            allow_macos_reader=True,
         )
         manifest = _manifest(config)
         invocation = {
@@ -416,7 +418,7 @@ def run_reader(
             interrupted_code = None
             observations = path / "observations"
             try:
-                run_supervised(
+                run_reader_supervised(
                     manifest["command"],
                     observations,
                     timeout_seconds=timeout_seconds,

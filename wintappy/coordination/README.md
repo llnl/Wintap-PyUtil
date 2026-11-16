@@ -535,8 +535,11 @@ Local harness controls are separate from the 641/439 runtime regression results:
 
 ## Linux command-tree supervision
 
-`supervisor.run_supervised(command, directory, ...)` is a Linux/main-thread library
-operation. Supply a new run directory on persistent local disk outside telemetry
+`supervisor.run_supervised(command, directory, ...)` is Linux-only, including for
+writers and direct library callers. The coordinated reader client uses the separate
+`supervisor.run_reader_supervised(...)` entry point; only that reader-scoped operation
+may select the accepted native-macOS backend. Both require the main thread. Supply a
+new run directory on persistent local disk outside telemetry
 and phase archives; its parent must already exist. It refuses existing directories
 instead of overwriting previous observations. The caller is responsible for the
 directory's exclusion/root binding. The separate Linux service supplies that
@@ -554,6 +557,10 @@ death. Only unreaped direct children of the isolated subreaper are signaled; it
 does not sweep unrelated processes or change the ledger process into a subreaper.
 This covers cooperative descendant trees, **not** hostile workloads, external
 services, cgroup containment, power loss or non-Linux clients.
+
+On macOS the coordinated reader entry point uses the documented best-effort dedicated
+process-group release rule in `MACOS.md`. It does not change generic supervision or
+enable native-Mac writer supervision.
 
 The supervising exec receives at most **1 MiB** of control in a sealed memory file,
 not a blocking stdin pipe or persisted environment/argv payload. Environment
