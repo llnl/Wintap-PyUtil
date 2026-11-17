@@ -75,7 +75,14 @@
                 or json_extract_string(binding_json, '$.{{ key }}') is distinct from '{{ value | replace("'", "''") }}'
                 {% endfor %}
                 or try_cast(json_extract_string(binding_json, '$.identity_max_ratio') as double) is distinct from cast('{{ env_var('WINTAP_DBT_PROCESS_UNKNOWN_IDENTITY_MAX_RATIO', '0.05') | replace("'", "''") }}' as double)
-                or json_extract(binding_json, '$.hosts') is distinct from cast('{{ tojson(bootstraps.keys() | sort | list) | replace("'", "''") }}' as json)
+                or json_type(json_extract(binding_json, '$.hosts')) is distinct from 'ARRAY'
+                or exists (
+                    select 1 from json_each(json_extract(binding_json, '$.hosts')) seed
+                    where seed.type is distinct from 'VARCHAR'
+                       or json_extract_string(seed.value, '$') not in (
+                           {% for host in bootstraps | sort %}'{{ host | replace("'", "''") }}'{% if not loop.last %},{% endif %}{% endfor %}
+                       )
+                )
                 or not coalesce(regexp_full_match(input_fingerprint, '[a-f0-9]{64}'), false)
                 or try_strptime(window_start, '%Y-%m-%dT%H:00:00Z') is null
                 or try_strptime(window_end, '%Y-%m-%dT%H:00:00Z') is null

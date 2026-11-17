@@ -29,7 +29,7 @@ def compact(tmp_path, command="entities-init", *extra):
     return json.loads(result.stdout)
 
 
-def setup(env, tmp_path):
+def setup(env, tmp_path, *, observed_host=False):
     seed_fixture(tmp_path / "input/raw_sensor")
     (tmp_path / "input/compacted").mkdir()
     base = "select " + fixture_queries()["raw_process"]
@@ -38,6 +38,14 @@ def setup(env, tmp_path):
             # Replace only our synthetic fixture, not a user dataset.
             conn.execute("create or replace temp table rewrite as select * replace('bridge' as ParentPidHash, 9::BIGINT as ParentPID) from read_parquet(?, hive_partitioning=false)", [str(path)])
             conn.execute("copy rewrite to ? (format parquet)", [str(path)])
+        if observed_host:
+            observed = tmp_path / "input/raw_sensor/raw_process/dayPK=20260102/hourPK=00/observed-host.parquet"
+            conn.execute(
+                "copy (select * replace ('observed-host' as Hostname, "
+                "'observed-agent' as AgentId, 'observed-process' as PidHash, "
+                "43::BIGINT as PID) from (" + base + ")) to ? (format parquet)",
+                [str(observed)],
+            )
         history = tmp_path / "input/raw_sensor/raw_process/dayPK=20260101/hourPK=23/history.parquet"
         current = tmp_path / "input/raw_sensor/raw_process/dayPK=20260102/hourPK=00/fanout.parquet"
         queries = []
@@ -63,6 +71,12 @@ def setup(env, tmp_path):
                WINTAP_DBT_PROCESS_ENTITY_ROOT=str(tmp_path / "input/process_entities"),
                WINTAP_DBT_PROCESS_ENTITY_HOSTS="TEST-HOST",
                WINTAP_DBT_PROCESS_ENTITY_NAMESPACE="test-pid-v2")
+
+
+def test_cumulative_observed_host_authority_is_accepted(env, tmp_path):
+    setup(env, tmp_path, observed_host=True)
+    env["WINTAP_DBT_PROCESS_ENTITY_HOSTS"] = "TEST-HOST,OBSERVED-HOST"
+    build(env, tmp_path / "dynamic-host-build")
 
 
 @pytest.mark.parametrize("state", ["raw", "mixed", "compacted"])
