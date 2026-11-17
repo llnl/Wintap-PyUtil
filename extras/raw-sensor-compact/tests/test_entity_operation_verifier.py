@@ -183,6 +183,24 @@ def test_genuine_input_observation_and_postcommit_recheck_are_read_only(
     assert snapshot(tmp_path) == before
 
 
+def test_entity_operation_discovers_host_not_in_seed_scope(conn, stores, tmp_path):
+    args, anchor = scope(conn, stores, tmp_path)
+    seed(
+        conn,
+        stores[0],
+        observation(hostname="OTHER", eventtime=200),
+        filename="other.parquet",
+    )
+    original = original_observation(conn, stores, args, anchor)
+    assert verify_inputs(args, anchor) == original
+
+    report, code = run(args)
+    assert code == 0
+    assert [host["hostname"] for host in report["hosts"]] == ["HOST", "OTHER"]
+    completed = verify_entities(args, original)
+    assert completed["status"] == "verified"
+
+
 @pytest.mark.parametrize("replay", [False, True])
 @pytest.mark.parametrize("multi", [False, True])
 def test_genuine_entity_completion_has_separate_read_only_evidence(

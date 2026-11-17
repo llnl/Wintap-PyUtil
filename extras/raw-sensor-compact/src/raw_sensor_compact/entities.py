@@ -10,6 +10,7 @@ from .config import CompactionError
 VERSION = "1"
 IDENTITY_POLICIES = {"reject", "quarantine"}
 DEFAULT_IDENTITY_MAX_RATIO = 0.05
+MAX_ENTITY_HOSTS = 4096
 FIELDS = (
     "pids",
     "parents",

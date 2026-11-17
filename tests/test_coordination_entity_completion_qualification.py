@@ -102,6 +102,26 @@ def change_statistics(report, damage):
         report["identity_exclusions"]["fingerprint"] = "a" * 64
 
 
+def test_cli_result_accepts_cumulative_observed_host_set(tmp_path):
+    with completed_fixture(tmp_path) as fixture:
+        _, prepared, _, intent, _ = fixture
+        report = json.loads(
+            Path(prepared.receipt["observations_directory"] + "/stdout.log").read_text()
+        )
+        report["hosts"].append(
+            {
+                **report["hosts"][0],
+                "hostname": "SYNTHETIC-NEW-HOST",
+            }
+        )
+        report["hosts"].sort(key=lambda host: host["hostname"])
+        entity_completion._cli_result(
+            report,
+            prepared.receipt,
+            intent["input_observation"]["result"],
+        )
+
+
 def rebind(proof):
     """Keep transport/capture hashes consistent; this does not authenticate files."""
     receipt = proof["receipt"]

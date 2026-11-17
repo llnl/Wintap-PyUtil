@@ -90,6 +90,21 @@ class Authority:
 
     def _validate(self):
         conn = self.conn
+        json_fields = (
+            "binding_json",
+            "bootstrap_starts",
+            "before_hashes",
+            "snapshot_hashes",
+            "semantic_hashes",
+        )
+        if conn.execute(
+            "SELECT count(*) FROM entity_authority WHERE "
+            + " OR ".join(
+                f"NOT coalesce(json_valid({field}), false)" for field in json_fields
+            )
+        ).fetchone()[0]:
+            raise CompactionError("Entity authority evidence is invalid")
+        seed_hosts = json.loads(self.binding)["hosts"]
         count, invalid = conn.execute(
             """
             WITH chain AS (
@@ -105,11 +120,53 @@ class Authority:
                 OR generation IS DISTINCT FROM ordinal
                 OR NOT coalesce(regexp_full_match(generation_id, '[a-f0-9]{64}'), false)
                 OR parent_id IS DISTINCT FROM coalesce(previous_id, '')
-                OR binding_json IS DISTINCT FROM ?
+                OR json_type(binding_json) IS DISTINCT FROM 'OBJECT'
+                OR json_extract(binding_json, '$.raw_root') IS DISTINCT FROM
+                    json_extract(?, '$.raw_root')
+                OR json_extract(binding_json, '$.compacted_root') IS DISTINCT FROM
+                    json_extract(?, '$.compacted_root')
+                OR json_extract(binding_json, '$.entity_root') IS DISTINCT FROM
+                    json_extract(?, '$.entity_root')
+                OR json_extract(binding_json, '$.metrics_root') IS DISTINCT FROM
+                    json_extract(?, '$.metrics_root')
+                OR json_extract(binding_json, '$.namespace') IS DISTINCT FROM
+                    json_extract(?, '$.namespace')
+                OR json_extract(binding_json, '$.identity_policy') IS DISTINCT FROM
+                    json_extract(?, '$.identity_policy')
+                OR json_extract(binding_json, '$.identity_max_ratio') IS DISTINCT FROM
+                    json_extract(?, '$.identity_max_ratio')
+                OR json_extract(binding_json, '$.hosts') IS DISTINCT FROM
+                    json_extract(?, '$.hosts')
                 OR status IS NULL OR status NOT IN ('pending', 'committed')
                 OR (status='pending' AND generation<>last_generation)
-                OR (generation>1 AND (before_hashes IS DISTINCT FROM previous_hashes
-                    OR bootstrap_starts IS DISTINCT FROM previous_bootstrap))
+                OR list_sort(json_keys(bootstrap_starts)) IS DISTINCT FROM
+                    list_sort(json_keys(snapshot_hashes))
+                OR list_sort(json_keys(semantic_hashes)) IS DISTINCT FROM
+                    list_sort(json_keys(snapshot_hashes))
+                OR list_sort(json_keys(before_hashes)) IS DISTINCT FROM
+                    list_sort(json_keys(snapshot_hashes))
+                OR NOT list_has_all(json_keys(snapshot_hashes), ?::VARCHAR[])
+                OR (generation>1 AND (
+                    NOT list_has_all(
+                        json_keys(snapshot_hashes), json_keys(previous_hashes))
+                    OR NOT list_has_all(
+                        json_keys(bootstrap_starts), json_keys(previous_bootstrap))
+                    OR EXISTS (
+                        SELECT 1 FROM json_each(previous_hashes) p
+                        LEFT JOIN json_each(before_hashes) b ON b.key=p.key
+                        WHERE b.key IS NULL OR b.value IS DISTINCT FROM p.value
+                    )
+                    OR EXISTS (
+                        SELECT 1 FROM json_each(before_hashes) b
+                        LEFT JOIN json_each(previous_hashes) p ON p.key=b.key
+                        WHERE p.key IS NULL AND b.type<>'NULL'
+                    )
+                    OR EXISTS (
+                        SELECT 1 FROM json_each(previous_bootstrap) p
+                        LEFT JOIN json_each(bootstrap_starts) b ON b.key=p.key
+                        WHERE b.key IS NULL OR b.value IS DISTINCT FROM p.value
+                    )
+                ))
                 OR NOT coalesce(
                     regexp_full_match(input_fingerprint, '[a-f0-9]{64}'), false)
                 OR try_strptime(window_start, '%Y-%m-%dT%H:00:00Z') IS NULL
@@ -117,7 +174,7 @@ class Authority:
                 OR window_start >= window_end)
             FROM chain
         """,
-            [self.binding],
+            [self.binding] * 8 + [seed_hosts],
         ).fetchone()
         if (
             not count
@@ -135,7 +192,6 @@ class Authority:
             raise CompactionError(
                 "Entity authority generation receipt identity mismatch"
             )
-        hosts = json.loads(self.binding)["hosts"]
         for field in (
             "bootstrap_starts",
             "before_hashes",
@@ -158,18 +214,18 @@ class Authority:
                     "json_extract_string(j.value, '$'), '[a-f0-9]{64}'))"
                 )
                 if field == "before_hashes":
-                    invalid_value += " AND NOT (a.generation=1 AND j.type='NULL')"
+                    invalid_value += " AND j.type<>'NULL'"
             invalid = conn.execute(
                 f"""
                 SELECT count(*) FROM entity_authority a
                 WHERE json_type({field}) <> 'OBJECT'
-                    OR (SELECT count(*) FROM json_each(a.{field})) <> ?
-                    OR (SELECT count(DISTINCT key) FROM json_each(a.{field})) <> ?
+                    OR NOT list_has_all(json_keys(a.{field}), ?::VARCHAR[])
+                    OR (SELECT count(*) FROM json_each(a.{field})) <>
+                        (SELECT count(DISTINCT key) FROM json_each(a.{field}))
                     OR EXISTS (SELECT 1 FROM json_each(a.{field}) j WHERE
-                        j.key NOT IN (SELECT unnest(?::VARCHAR[])) OR
                         ({invalid_value}))
             """,
-                [len(hosts), len(hosts), hosts],
+                [seed_hosts],
             ).fetchone()[0]
             if invalid:
                 raise CompactionError("Entity authority host evidence is invalid")
@@ -180,6 +236,13 @@ class Authority:
             raise CompactionError(
                 "Entity authority genesis must start with absent snapshots"
             )
+
+    @property
+    def hosts(self):
+        """Cumulative host identities attested by the latest generation."""
+        if self.latest is None:
+            return ()
+        return tuple(sorted(json.loads(self.latest["snapshot_hashes"])))
 
     def check(self, identities, bootstrap, *, pending=False):
         if self.latest is None:
@@ -199,7 +262,15 @@ class Authority:
             json.loads(row["snapshot_hashes"]),
         )
         expected_bootstrap = json.loads(row["bootstrap_starts"])
+        if not set(after) <= identities.keys():
+            raise CompactionError("Entity authority host set is incomplete")
         for host, identity in identities.items():
+            if host not in after:
+                if identity is not None:
+                    raise CompactionError(
+                        "Unattested entity snapshot cannot enter authority"
+                    )
+                continue
             allowed = (
                 (before[host], after[host])
                 if row["status"] == "pending"

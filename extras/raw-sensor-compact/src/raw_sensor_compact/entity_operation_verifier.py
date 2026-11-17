@@ -542,15 +542,11 @@ def _process(conn, source, compacted, args, hours, limits):
         hours,
         deadline=source.check_deadline,
     )
-    if conn.execute(
-        "SELECT count(*) FROM entity_input WHERE hostname NOT IN "
-        "(SELECT unnest(?::VARCHAR[]))",
+    if args.command == "entities-init" and conn.execute(
+        "SELECT count(*) FROM unnest(?::VARCHAR[]) h "
+        "WHERE NOT EXISTS (SELECT 1 FROM entity_input e WHERE e.hostname=h.unnest)",
         [args.entity_host],
     ).fetchone()[0]:
-        raise CompactionError("Entity inputs contain an unexpected host")
-    if args.command == "entities-init" and conn.execute(
-        "SELECT count(DISTINCT hostname) FROM entity_input"
-    ).fetchone()[0] != len(args.entity_host):
         raise CompactionError(
             "Entity genesis requires observations for every expected host"
         )
@@ -851,7 +847,15 @@ def _grammar(records, args, binding, original):
         }
         or report["status"] != "completed"
         or not isinstance(report["hosts"], list)
-        or [h.get("hostname") for h in report["hosts"]] != args.entity_host
+        or any(
+            not isinstance(host, dict)
+            or not isinstance(host.get("hostname"), str)
+            for host in report["hosts"]
+        )
+        or [h.get("hostname") for h in report["hosts"]]
+        != sorted({h.get("hostname") for h in report["hosts"]})
+        or not set(args.entity_host)
+        <= {h.get("hostname") for h in report["hosts"]}
         or any(
             report[k] != original["inputs"][k]
             for k in (
@@ -948,6 +952,28 @@ def _publication(
         before, snapshots, semantics, bootstraps = map(
             json.loads, (before, snapshots, semantics, bootstraps)
         )
+        report_hosts = {host["hostname"] for host in report["hosts"]}
+        expected_hosts = set(args.entity_host)
+        expected_hosts.update(
+            row[0]
+            for row in conn.execute(
+                "SELECT DISTINCT hostname FROM entity_input"
+            ).fetchall()
+        )
+        anchor = original["authority_high_water"]
+        if anchor is not None:
+            previous = conn.execute(
+                "SELECT snapshot_hashes FROM entity_authority WHERE generation=? "
+                "AND generation_id=? AND status='committed'",
+                [anchor["generation"], anchor["generation_id"]],
+            ).fetchone()
+            if previous is None:
+                raise CompactionError("Entity original prior host receipt is missing")
+            expected_hosts.update(json.loads(previous[0]))
+        if report_hosts != expected_hosts or report_hosts != set(snapshots):
+            raise CompactionError(
+                "Entity original publication host discovery mismatch"
+            )
         for host in report["hosts"]:
             name = host["hostname"]
             if (

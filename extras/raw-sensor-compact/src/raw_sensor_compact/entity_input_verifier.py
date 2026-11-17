@@ -10,7 +10,7 @@ import hashlib
 
 from .config import CompactionError
 from .engine import check_hive_fields, schema
-from .entities import SOURCE_COLUMNS, identity_reasons
+from .entities import MAX_ENTITY_HOSTS, SOURCE_COLUMNS, identity_reasons
 from .phase_evidence import canonical
 
 MAX_DIAGNOSTIC_BYTES = 64 * 1024
@@ -72,7 +72,7 @@ def _summary(conn, partition, *, hosts, deadline):
         + where
         + " GROUP BY observed_host ORDER BY observed_host",
         params,
-        len(hosts) + 1,
+        MAX_ENTITY_HOSTS,
         deadline,
     )
     reasons = _groups(
@@ -150,12 +150,18 @@ def load_process_inputs(conn, inventories, args, hours, *, deadline):
         "SELECT count(*) FROM entity_input WHERE "
         "instr(hostname, chr(0)) > 0 OR instr(hostname, chr(10)) > 0 OR "
         "instr(hostname, chr(13)) > 0 OR "
-        "(coalesce(trim(hostname), '') <> '' AND upper(trim(hostname)) "
-        "NOT IN (SELECT unnest(?::VARCHAR[]))) OR "
-        "activitytype IS NULL OR upper(activitytype) NOT IN ('START','STOP','REFRESH')",
+        "activitytype IS NULL OR upper(activitytype) NOT IN ('START','STOP','REFRESH') "
+        "OR ("
+        + IDENTITY_WHERE
+        + ") AND coalesce(trim(hostname), '') <> '' AND upper(trim(hostname)) "
+        "NOT IN (SELECT unnest(?::VARCHAR[]))",
         [args.entity_host],
     ).fetchone()[0]:
-        raise CompactionError("Invalid process lifecycle or unexpected host scope")
+        raise CompactionError("Invalid process lifecycle or unexpected host")
+    if conn.execute(
+        "SELECT count(DISTINCT upper(trim(hostname))) FROM entity_input"
+    ).fetchone()[0] > MAX_ENTITY_HOSTS:
+        raise CompactionError("Observed entity host count exceeds scope budget")
     input_counts = _groups(
         conn,
         "SELECT partition, count(*) FROM entity_input GROUP BY partition "

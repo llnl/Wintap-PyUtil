@@ -26,8 +26,8 @@ from raw_sensor_compact.processing_metrics import ProcessingMetricsStore
 stores = stores_fixture
 
 
-def failed_and_repaired(conn, stores, tmp_path, monkeypatch):
-    args = args_for(stores, tmp_path, entities=True)
+def failed_and_repaired(conn, stores, tmp_path, monkeypatch, *, delete=True):
+    args = args_for(stores, tmp_path, entities=True, delete=delete)
     seed(conn, stores[0])
     update_entities(conn, *stores, HOURS, ["HOST"], initialize=True)
     anchor = baseline(args)
@@ -98,6 +98,25 @@ def test_repaired_completion_is_read_only_and_preserves_forward_history(
     )
     assert forward["checkpoint_sha256"] == result["checkpoint_sha256"]
     assert all(path.read_bytes() == payload for path, payload in originals.items())
+
+
+def test_repaired_no_deletion_completion_keeps_deletion_not_requested(
+    conn, stores, tmp_path, monkeypatch
+):
+    args, repair, anchor = failed_and_repaired(
+        conn, stores, tmp_path, monkeypatch, delete=False
+    )
+
+    result = verify(args, repair, anchor)
+    metric = next(
+        Path(stores[0].dataset.sibling("processing_metrics").root).rglob("*.parquet")
+    )
+    row = conn.execute(
+        "SELECT deletion_status FROM read_parquet(?)", [str(metric)]
+    ).fetchone()
+
+    assert result["status"] == "verified"
+    assert row == ("not_requested",)
 
 
 @pytest.mark.parametrize(

@@ -1,5 +1,6 @@
 """Freshness is independent of scalar/evidence integrity; use active entrypoints."""
 
+import json
 from pathlib import Path
 
 import pytest
@@ -64,6 +65,24 @@ def test_forward_evolution_and_out_of_order_replay_remain_valid(conn, stores, ca
     replay, _ = update_entities(conn, source, compacted, entities, HOURS, ["HOST"])
     assert not replay["hosts"][0]["changed"]
     assert replay["hosts"][0]["bootstrap_start"] == first["hosts"][0]["bootstrap_start"]
+
+
+def test_verify_discovers_hosts_from_authority_not_seed_list(conn, stores, capsys):
+    source, compacted, entities = stores
+    seed(conn, source)
+    update_entities(conn, source, compacted, entities, HOURS, ["HOST"], initialize=True)
+    seed(
+        conn,
+        source,
+        observation(hostname="OTHER", eventtime=300),
+        hour="01",
+        filename="other.parquet",
+    )
+    update_entities(conn, source, compacted, entities, LATER, ["HOST"])
+
+    assert verify(source, compacted, entities) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert [host["hostname"] for host in report["hosts"]] == ["HOST", "OTHER"]
 
 
 @pytest.mark.parametrize("entrypoint", ["verify", "update"])

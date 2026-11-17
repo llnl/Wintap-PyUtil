@@ -186,10 +186,16 @@ def _cli_result(report, receipt, original):
         raise CoordinationError("Entity CLI checkpoint/archive scope mismatch")
     _hash(phase["last_sha256"])
     hosts = report["hosts"]
+    configured_hosts = receipt["settings"]["entity"]["hosts"]
+    reported_hosts = [host.get("hostname") for host in hosts]
     if (
         not isinstance(hosts, list)
-        or [host.get("hostname") for host in hosts]
-        != receipt["settings"]["entity"]["hosts"]
+        or not 0 < len(hosts) <= 1024
+        or any(
+            not isinstance(hostname, str) or not hostname for hostname in reported_hosts
+        )
+        or reported_hosts != sorted(set(reported_hosts))
+        or not set(configured_hosts) <= set(reported_hosts)
         or not isinstance(report["identity_exclusions"], dict)
     ):
         raise CoordinationError("Entity CLI host/exclusion scope mismatch")

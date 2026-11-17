@@ -394,7 +394,6 @@ def _grammar(
         terminal = records[-1]["data"]
         if (
             not args.process_entity_root
-            or not args.delete_source
             or set(terminal) != {"message"}
             or not isinstance(terminal["message"], str)
             or not terminal["message"]

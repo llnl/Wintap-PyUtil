@@ -11,6 +11,7 @@ from botocore.exceptions import ClientError
 from .config import CompactionError, separate_roots, utc_hour
 from .entities import (
     DEFAULT_IDENTITY_MAX_RATIO,
+    MAX_ENTITY_HOSTS,
     SCHEMA,
     VERSION,
     EntityLimits,
@@ -322,8 +323,8 @@ def update_entities(
     from .entities import load_inputs
     from .entity_authority import Authority, binding
 
-    hosts = tuple(sorted({host_name(h) for h in hosts}))
-    if not hosts:
+    seed_hosts = tuple(sorted({host_name(h) for h in hosts}))
+    if not seed_hosts:
         raise CompactionError("Explicit expected entity hosts are required")
     for other in (source, compacted):
         separate_roots(other.dataset, entities.store.dataset)
@@ -349,24 +350,47 @@ def update_entities(
         r[0]
         for r in conn.execute("SELECT DISTINCT hostname FROM entity_input").fetchall()
     }
-    if not observed <= set(hosts):
-        raise CompactionError("Observed host is not explicitly initialized/expected")
-    if initialize and not allow_empty and observed != set(hosts):
+    if len(observed) > MAX_ENTITY_HOSTS:
+        raise CompactionError("Observed entity host count exceeds scope budget")
+    if initialize and not allow_empty and not set(seed_hosts) <= observed:
         raise CompactionError("Empty host bootstrap requires --allow-empty-host")
-    report = {
-        "status": "planned" if plan else "completed",
-        "hosts": [],
-        "source_fingerprint": inventories[0].fingerprint,
-        "compacted_fingerprint": inventories[1].fingerprint,
-        "process_input_fingerprint": hashlib.sha256(
-            json.dumps(
-                [inventory.fingerprint for inventory in inventories], sort_keys=True
-            ).encode()
-        ).hexdigest(),
-        "identity_exclusions": identity_exclusions,
-    }
     with TemporaryDirectory(prefix="process-entities-") as directory:
         directory = Path(directory)
+        authority = Authority(
+            conn,
+            entities,
+            directory,
+            binding(
+                source,
+                compacted,
+                entities,
+                seed_hosts,
+                identity_policy,
+                identity_max_ratio,
+                metrics_root,
+            ),
+        )
+        if authority.latest is None and not initialize:
+            raise CompactionError(
+                "Entity authority missing; initialize/rebuild explicitly"
+            )
+        hosts = tuple(sorted(set(seed_hosts) | set(authority.hosts) | observed))
+        if len(hosts) > MAX_ENTITY_HOSTS:
+            raise CompactionError("Entity host history exceeds scope budget")
+        new_hosts = observed - set(authority.hosts)
+        report = {
+            "status": "planned" if plan else "completed",
+            "hosts": [],
+            "source_fingerprint": inventories[0].fingerprint,
+            "compacted_fingerprint": inventories[1].fingerprint,
+            "process_input_fingerprint": hashlib.sha256(
+                json.dumps(
+                    [inventory.fingerprint for inventory in inventories],
+                    sort_keys=True,
+                ).encode()
+            ).hexdigest(),
+            "identity_exclusions": identity_exclusions,
+        }
         prepared = []
         old_paths = []
         snapshots = {}
@@ -377,11 +401,27 @@ def update_entities(
                 raise CompactionError(
                     "Entity init requires absent host snapshots; use replay"
                 )
-            if not initialize and identity is None:
+            if (
+                not initialize
+                and identity is None
+                and host not in new_hosts
+            ):
                 raise CompactionError(
                     "Expected entity snapshot missing; initialize/rebuild explicitly"
                 )
-            metadata = entities.metadata(host, hours[0].strftime("%Y-%m-%dT%H:00:00Z"))
+            bootstrap_hour = hours[0]
+            if host in new_hosts:
+                first_partition = conn.execute(
+                    "SELECT min(partition) FROM entity_input WHERE hostname=?",
+                    [host],
+                ).fetchone()[0]
+                if first_partition:
+                    from datetime import datetime
+
+                    bootstrap_hour = datetime.strptime(first_partition, "%Y%m%d%H")
+            metadata = entities.metadata(
+                host, bootstrap_hour.strftime("%Y-%m-%dT%H:00:00Z")
+            )
             if identity is not None:
                 entities.validate_sql(conn, old, host, None)
                 metadata = entities.sql_metadata(conn, old)
@@ -389,20 +429,6 @@ def update_entities(
             if identity is not None:
                 old_paths.append(old)
 
-        authority = Authority(
-            conn,
-            entities,
-            directory,
-            binding(
-                source,
-                compacted,
-                entities,
-                hosts,
-                identity_policy,
-                identity_max_ratio,
-                metrics_root,
-            ),
-        )
         identities = {host: value[1] for host, value in snapshots.items()}
         authority.check(
             identities,

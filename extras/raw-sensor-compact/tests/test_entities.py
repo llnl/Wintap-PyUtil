@@ -155,6 +155,42 @@ def test_empty_metadata_and_missing_expected_snapshot(conn, stores, tmp_path):
         update_entities(conn, source, compacted, entities, HOURS, ["HOST"])
 
 
+def test_first_seen_observed_host_is_initialized_and_retained(conn, stores, tmp_path):
+    source, compacted, entities = stores
+    seed(conn, source)
+    update_entities(conn, source, compacted, entities, HOURS, ["HOST"], initialize=True)
+
+    later = hour_window("2026-01-01T02:00:00Z", "2026-01-01T03:00:00Z")
+    seed(conn, source, observation(hostname="OTHER", eventtime=300), hour="02")
+    report, _ = update_entities(conn, source, compacted, entities, later, ["HOST"])
+
+    assert [item["hostname"] for item in report["hosts"]] == ["HOST", "OTHER"]
+    assert report["hosts"][1]["changed"]
+    assert report["hosts"][1]["bootstrap_start"] == "2026-01-01T02:00:00Z"
+    other = tmp_path / "other.parquet"
+    assert entities.read("OTHER", other)
+    assert entities.sql_metadata(conn, other)["bootstrap_start"] == "2026-01-01T02:00:00Z"
+
+    next_hour = hour_window("2026-01-01T03:00:00Z", "2026-01-01T04:00:00Z")
+    seed(conn, source, observation(activitytype="STOP", eventtime=400), hour="03")
+    next_report, _ = update_entities(
+        conn, source, compacted, entities, next_hour, ["HOST"]
+    )
+    assert [item["hostname"] for item in next_report["hosts"]] == ["HOST", "OTHER"]
+    assert not next_report["hosts"][1]["changed"]
+    assert next_report["hosts"][1]["bootstrap_start"] == "2026-01-01T02:00:00Z"
+
+    generations = conn.execute(
+        "SELECT before_hashes, snapshot_hashes, bootstrap_starts "
+        "FROM read_parquet(?) ORDER BY generation",
+        [str(Path(entities.store.dataset.root) / "_authority/authority.parquet")],
+    ).fetchall()
+    assert len(generations) == 3
+    assert '"OTHER":null' in generations[1][0]
+    assert '"OTHER"' in generations[1][1]
+    assert '"OTHER":"2026-01-01T02:00:00Z"' in generations[1][2]
+
+
 @pytest.mark.parametrize("changes", [{"pid": -1}, {"pidhash": "unknown"}, {"hostname": ""}])
 def test_unknown_identity_fails_closed(conn, stores, changes):
     source, compacted, entities = stores

@@ -140,6 +140,9 @@ def metric_rows(
     completed_at: str | None = None,
 ) -> list[dict]:
     """Build one durable checkpoint row for each requested UTC hour."""
+    delete_source = report.get("delete_source", False)
+    if type(delete_source) is not bool:
+        raise CompactionError("Checkpoint source-deletion setting must be boolean")
     completed_at = completed_at or datetime.now(timezone.utc).isoformat()
     hosts_report = entity_report.get("hosts", [])
     entity_hashes = {
@@ -238,7 +241,11 @@ def metric_rows(
                 "raw_output_files": compacted["files"],
                 "raw_output_bytes": compacted["bytes"],
                 "raw_output_rows": _sum_partitions(report, hour, "merged_rows"),
-                "deletion_status": "failed" if deletion_failures else "completed",
+                "deletion_status": "failed"
+                if deletion_failures
+                else "completed"
+                if delete_source
+                else "not_requested",
                 "deletion_failures": deletion_failures,
                 "completed_at": completed_at,
             }
@@ -281,15 +288,18 @@ def validate_checkpoint_receipts(conn, rows, hours, binding):
                 "Original checkpoint historical receipt missing/duplicated"
             )
         status, hashes, bootstraps, fingerprint, start, end = receipt
+        receipt_hashes = json.loads(hashes)
+        receipt_bootstraps = json.loads(bootstraps)
         if (
             status != "committed"
             or row["metric_version"] != VERSION
             or not row["entity_mode"]
             or row["entity_namespace"] != binding["namespace"]
-            or row["expected_host_count"] != len(binding["hosts"])
+            or row["expected_host_count"] != len(receipt_hashes)
+            or set(receipt_hashes) != set(receipt_bootstraps)
             or row["entity_snapshot_hashes"]
-            != json.dumps(json.loads(hashes), sort_keys=True)
-            or row["entity_bootstrap_start"] != min(json.loads(bootstraps).values())
+            != json.dumps(receipt_hashes, sort_keys=True)
+            or row["entity_bootstrap_start"] != min(receipt_bootstraps.values())
             or row["entity_input_fingerprint"] != fingerprint
             or row["identity_policy"] != binding["identity_policy"]
             or row["identity_exclusion_max_ratio"] != binding["identity_max_ratio"]

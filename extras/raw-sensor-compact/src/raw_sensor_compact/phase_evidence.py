@@ -491,6 +491,9 @@ def repair_checkpoints(
     checkpoints = [r for r in records if r["phase"] == "checkpoint_intent"]
     entities = [r for r in records if r["phase"] == "entities_verified"]
     raw_record = next(r for r in records if r["phase"] == "raw_complete")
+    expected_deletion_status = (
+        "completed" if raw_record["data"]["delete_source"] else "not_requested"
+    )
     if (
         len(checkpoints) != 1
         or len(entities) != 1
@@ -515,7 +518,7 @@ def repair_checkpoints(
             or row["status"] != "completed"
             or row["raw_status"] != expected_status
             or row["deletion_failures"] != 0
-            or row["deletion_status"] != "completed"
+            or row["deletion_status"] != expected_deletion_status
             or row["raw_source_rows"] != _sum_partitions(raw, hour, "source_rows")
             or row["raw_output_rows"] != _sum_partitions(raw, hour, "merged_rows")
         ):

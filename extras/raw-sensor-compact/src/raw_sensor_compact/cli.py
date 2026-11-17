@@ -220,8 +220,23 @@ def _verify_entity_state(conn, source, merged, entities, args, metrics_root):
 
     report = {"status": "passed", "hosts": []}
     with TemporaryDirectory(prefix="entity-verify-") as directory:
+        authority = Authority(
+            conn,
+            entities,
+            directory,
+            binding(
+                source,
+                merged,
+                entities,
+                sorted({host_name(h) for h in args.entity_host}),
+                args.unknown_identity_policy,
+                args.unknown_identity_max_ratio,
+                metrics_root.root,
+            ),
+        )
+        hosts = sorted({host_name(h) for h in args.entity_host} | set(authority.hosts))
         identities, bootstraps = {}, {}
-        for host in sorted({host_name(h) for h in args.entity_host}):
+        for host in sorted({host_name(h) for h in hosts}):
             path = Path(directory) / "snapshot.parquet"
             snapshot_identity = entities.read(host, path)
             if snapshot_identity is None:
@@ -241,20 +256,6 @@ def _verify_entity_state(conn, source, merged, entities, args, metrics_root):
                     "snapshot_sha256": snapshot_identity,
                 }
             )
-        authority = Authority(
-            conn,
-            entities,
-            directory,
-            binding(
-                source,
-                merged,
-                entities,
-                identities,
-                args.unknown_identity_policy,
-                args.unknown_identity_max_ratio,
-                metrics_root.root,
-            ),
-        )
         authority.check(identities, bootstraps)
         report["generation_id"] = authority.latest["generation_id"]
         report["authority_sha256"] = authority.identity

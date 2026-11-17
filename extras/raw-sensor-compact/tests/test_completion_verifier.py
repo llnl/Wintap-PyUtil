@@ -270,6 +270,27 @@ def test_historical_checkpoint_and_forward_lineage_do_not_compare_current_hashes
     assert forward["checkpoint_generation_id"] == original["checkpoint_generation_id"]
 
 
+def test_entity_completion_records_source_deletion_as_not_requested(
+    conn, stores, tmp_path
+):
+    args = args_for(stores, tmp_path, entities=True, delete=False)
+    seed(conn, stores[0])
+    update_entities(conn, *stores, HOURS, ["HOST"], initialize=True)
+    anchor = baseline(args)
+
+    report, code = run(args)
+
+    assert code == 0 and report["phase_evidence"]["migration_complete"]
+    metric = next(
+        Path(stores[0].dataset.sibling("processing_metrics").root).rglob("*.parquet")
+    )
+    row = conn.execute(
+        "SELECT deletion_status FROM read_parquet(?)", [str(metric)]
+    ).fetchone()
+    assert row == ("not_requested",)
+    assert verify(args, anchor)["status"] == "verified"
+
+
 @pytest.mark.parametrize(
     "corruption",
     ["no_baseline", "rollback", "fork", "checkpoint", "pending", "snapshot"],
