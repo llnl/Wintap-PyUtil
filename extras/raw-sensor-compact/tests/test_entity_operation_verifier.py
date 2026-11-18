@@ -15,10 +15,10 @@ from test_phase_evidence import invocation
 from raw_sensor_compact.cli import _verify_entity_state, run
 from raw_sensor_compact.completion import verify_authority, verify_completion
 from raw_sensor_compact.config import CompactionError, Dataset, hour_window
-from raw_sensor_compact.engine import count_rows, schema
+from raw_sensor_compact.engine import count_rows
 from raw_sensor_compact.entity_store import update_entities
 from raw_sensor_compact.inventory import Store, discover
-from raw_sensor_compact.phase_evidence import canonical, identity, inventory_evidence
+from raw_sensor_compact.phase_evidence import canonical, identity
 from raw_sensor_compact.processing_metrics import (
     ProcessingMetricsStore,
     inventory_hour_stats,
@@ -86,16 +86,31 @@ def original_observation(conn, stores, args, anchor):
     for name, store, inventory in zip(
         ("raw", "compacted"), stores[:2], inventories, strict=True
     ):
-        evidence = inventory_evidence(store, inventory)
-        for item in evidence:
-            files = [item["file"]["uri"]]
-            item.update(rows=count_rows(conn, files), schema=schema(conn, files))
+        files = [
+            file
+            for leaf in sorted(inventory.groups)
+            for file in inventory.groups[leaf]
+        ]
+        rows = count_rows(conn, [file.uri for file in files]) if files else 0
         inputs[name] = {
             "inventory_sha256": inventory.fingerprint,
-            "content_sha256": identity(evidence),
-            "files": len(evidence),
-            "bytes": sum(item["file"]["size"] for item in evidence),
-            "rows": sum(item["rows"] for item in evidence),
+            "content_sha256": identity(
+                {
+                    "objects": [
+                        {
+                            "relative": file.relative,
+                            "size": file.size,
+                            "etag": file.etag,
+                            "modified": file.modified,
+                        }
+                        for file in files
+                    ],
+                    "rows": rows,
+                }
+            ),
+            "files": len(files),
+            "bytes": sum(file.size for file in files),
+            "rows": rows,
         }
     process = [discover(s, hours, ("raw_process",)) for s in stores[:2]]
     inputs["process_input_fingerprint"] = hashlib.sha256(

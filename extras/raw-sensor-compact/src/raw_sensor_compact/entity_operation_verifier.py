@@ -15,7 +15,6 @@ import re
 import stat
 import sys
 from contextlib import contextmanager
-from dataclasses import asdict
 from datetime import timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -34,7 +33,7 @@ from .config import (
     separate_roots,
 )
 from .deletion_recovery import prefix_inventory
-from .engine import check_hive_fields, connection, count_rows, schema
+from .engine import connection, count_rows
 from .entities import EntityLimits, host_name
 from .entity_authority import Authority
 from .entity_authority import binding as authority_binding
@@ -455,28 +454,44 @@ def _inventory(store, hours, events, ceiling):
     return discover(store, hours, events, max_files=ceiling)
 
 
-def _object_evidence(store, inventory, conn):
-    for leaf, files in sorted(inventory.groups.items()):
-        for file in files:
-            if store.dataset.bucket:
-                from .phase_evidence import object_digest
+def _input_files(inventory):
+    return [
+        file
+        for leaf in sorted(inventory.groups)
+        for file in inventory.groups[leaf]
+    ]
 
-                hashed = object_digest(store, file)
-            else:
-                hashed = _stream_local(file.uri, file.size, store.check_deadline)
-            columns = schema(conn, [file.uri])
-            check_hive_fields(conn, [file.uri], leaf, columns)
-            yield {
-                "leaf": leaf.as_dict(),
-                "file": asdict(file),
-                "sha256": hashed,
-                "rows": count_rows(conn, [file.uri]),
-                "schema": columns,
-            }
+
+def _validate_local_input_files(store, files):
+    """Keep local path safety checks without reopening file bodies."""
+    if not store.dataset.bucket:
+        for file in files:
+            _regular(file.uri, file.size)
+
+
+def _input_content_observation(files, rows):
+    """Bind object identity and aggregate rows without downloading file bodies.
+
+    The inventory already captures the selected key, size, ETag and modification
+    time for every object.  This intentionally weaker entity policy accepts a
+    same-size, same-row-count replacement as an operational risk for large live
+    catch-up jobs.  The small digest preserves the existing interchange shape
+    while no longer representing a content hash.
+    """
+    objects = [
+        {
+            "relative": file.relative,
+            "size": file.size,
+            "etag": file.etag,
+            "modified": file.modified,
+        }
+        for file in files
+    ]
+    return identity({"objects": objects, "rows": rows})
 
 
 def _inputs(conn, source, compacted, hours, events, limits):
-    """Exact selected-event inventories/content/schema/counts, plus process scope."""
+    """Selected-event identity/size/aggregate-row evidence, plus process scope."""
     stores = source, compacted
     result = {}
     total_files = 0
@@ -495,18 +510,14 @@ def _inputs(conn, source, compacted, hours, events, limits):
             raise CompactionError(
                 "Entity selected-input file budget exceeded; no pruning"
             )
-        digest, files, size, rows = hashlib.sha256(b"["), 0, 0, 0
-        for item in _object_evidence(store, inventory, conn):
-            if files:
-                digest.update(b",")
-            digest.update(canonical(item).encode())
-            files += 1
-            size += item["file"]["size"]
-            rows += item["rows"]
-        digest.update(b"]")
+        selected = _input_files(inventory)
+        _validate_local_input_files(store, selected)
+        files = len(selected)
+        size = sum(file.size for file in selected)
+        rows = count_rows(conn, [file.uri for file in selected]) if selected else 0
         result[name] = {
             "inventory_sha256": inventory.fingerprint,
-            "content_sha256": digest.hexdigest(),
+            "content_sha256": _input_content_observation(selected, rows),
             "files": files,
             "bytes": size,
             "rows": rows,

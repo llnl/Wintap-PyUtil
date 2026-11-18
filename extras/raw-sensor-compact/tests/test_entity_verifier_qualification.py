@@ -213,18 +213,9 @@ def test_selected_file_budget_is_shared_across_raw_and_compacted(
     args, anchor = scope(conn, stores, tmp_path)
     seed(conn, stores[1], observation(pidhash="compacted-instance"))
     args.max_files = 1
-    seen = []
-    original = verifier._object_evidence
-
-    def observed(store, inventory, connection):
-        seen.append(store.dataset.root)
-        yield from original(store, inventory, connection)
-
-    monkeypatch.setattr(verifier, "_object_evidence", observed)
     before = snapshot(tmp_path)
     with pytest.raises(CompactionError, match="selected-input file budget"):
         verify_inputs(args, anchor)
-    assert seen == [stores[0].dataset.root]
     assert snapshot(tmp_path) == before
 
 

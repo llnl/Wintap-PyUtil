@@ -368,6 +368,14 @@ Run-ID reuse, symlinks, malformed lineage and exhausted archive budgets fail rat
 than overwriting/pruning history. Limits are 64 MiB/record, 256 MiB/run and 10,000
 records. Object hashes stream in 1 MiB chunks under the command deadline.
 
+The independent entity-only input verifier uses a deliberately weaker live
+catch-up policy: it binds each selected object by key, size, ETag and modified
+time, and checks one aggregate row count per root/window. It does not stream
+each object body or count rows separately per file. A replacement with the same
+object identity metadata and aggregate row count is an accepted operational
+risk for this policy; the ordinary compaction/run-evidence hashing policy is
+unchanged.
+
 `phase_evidence.migration_complete` concerns the **raw** phase only. Skipped,
 mixed skipped/processed, already-deleted or uncertain outcomes are false;
 entity-only replay is false. Verified empty event-hours may accompany merged hours.
