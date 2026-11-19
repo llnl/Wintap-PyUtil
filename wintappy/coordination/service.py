@@ -393,6 +393,7 @@ def main(argv=None):
             "release-reader",
             "resolve-hour",
             "retry-hour",
+            "retry-interrupted-hour",
             "repair-checkpoints",
             "repair-deletions",
             "abandon-maintenance",
@@ -463,7 +464,7 @@ def main(argv=None):
                 _window(args.start_hour, args.end_hour)
             else:
                 identifier(args.run_id)
-        if args.operation == "retry-hour":
+        if args.operation in {"retry-hour", "retry-interrupted-hour"}:
             from .recovery import _confirmation
 
             if sys.platform != "linux":
@@ -584,21 +585,36 @@ def main(argv=None):
                         confirmed=args.confirm,
                         reason=args.reason,
                     )
-                elif args.operation == "retry-hour":
-                    from .intentional_retry import retry_and_complete_prepared
+                elif args.operation in {"retry-hour", "retry-interrupted-hour"}:
                     from .recovery import load_original_execution
 
                     prepared = load_original_execution(
                         ledger, args.run_id, config["writer"]
                     )
-                    value = retry_and_complete_prepared(
-                        ledger,
-                        prepared,
-                        now,
-                        clock=_now,
-                        confirmed=args.confirm,
-                        reason=args.reason,
-                    )
+                    if args.operation == "retry-interrupted-hour":
+                        from .intentional_retry import (
+                            retry_interrupted_and_complete_prepared,
+                        )
+
+                        value = retry_interrupted_and_complete_prepared(
+                            ledger,
+                            prepared,
+                            now,
+                            clock=_now,
+                            confirmed=args.confirm,
+                            reason=args.reason,
+                        )
+                    else:
+                        from .intentional_retry import retry_and_complete_prepared
+
+                        value = retry_and_complete_prepared(
+                            ledger,
+                            prepared,
+                            now,
+                            clock=_now,
+                            confirmed=args.confirm,
+                            reason=args.reason,
+                        )
                 elif args.operation in {
                     "resolve-hour",
                     "repair-checkpoints",

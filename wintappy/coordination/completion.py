@@ -122,23 +122,36 @@ def validate_completion_proof(proof, run, binding, ledger_id):
         or len(canonical(proof).encode()) > MAX_HISTORY_BYTES
     ):
         raise CoordinationError("Invalid bounded completion proof")
-    if retry is not None and (
-        recovery is not None
-        or not isinstance(retry, dict)
-        or set(retry)
-        != {
-            "disposition_sha256",
-            "prelaunch_sha256",
-            "original_migration_sha256",
-            "retry_migration_sha256",
-        }
-        or any(
-            not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{64}", value)
-            for value in retry.values()
-        )
-        or retry["original_migration_sha256"] != retry["retry_migration_sha256"]
-    ):
-        raise CoordinationError("Invalid original-bound retry completion identity")
+    if retry is not None:
+        if recovery is not None or not isinstance(retry, dict):
+            raise CoordinationError("Invalid original-bound retry completion identity")
+        if retry.get("kind") == "interrupted-prepublication":
+            if set(retry) != {
+                "kind",
+                "disposition_sha256",
+                "prelaunch_sha256",
+                "preflight_sha256",
+            } or any(
+                not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{64}", value)
+                for key, value in retry.items()
+                if key != "kind"
+            ):
+                raise CoordinationError("Invalid interrupted retry completion identity")
+        elif (
+            set(retry)
+            != {
+                "disposition_sha256",
+                "prelaunch_sha256",
+                "original_migration_sha256",
+                "retry_migration_sha256",
+            }
+            or any(
+                not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{64}", value)
+                for value in retry.values()
+            )
+            or retry["original_migration_sha256"] != retry["retry_migration_sha256"]
+        ):
+            raise CoordinationError("Invalid original-bound retry completion identity")
     identifier(ledger_id)
     intent = json.loads(run["intent_json"])
     if digest(intent) != run["intent_sha256"] or "execution" not in intent:

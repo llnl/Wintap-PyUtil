@@ -177,7 +177,15 @@ def test_incomplete_or_nonlinux_entity_dispatch_refuses_before_configuration(
 
 
 @pytest.mark.parametrize(
-    "operation", ["init", "tick", "status", "retry-hour", "resolve-hour"]
+    "operation",
+    [
+        "init",
+        "tick",
+        "status",
+        "retry-hour",
+        "retry-interrupted-hour",
+        "resolve-hour",
+    ],
 )
 @pytest.mark.parametrize(
     "flag,value",
