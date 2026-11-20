@@ -7,8 +7,9 @@ from pathlib import Path
 import pytest
 
 from .test_compacted_inputs import seed_fixture
-from .test_dbt_source_validation import CONFIG, ROOT, operation, parquet_file
+from .test_dbt_source_validation import CONFIG, ROOT
 from .test_dbt_source_validation import env as env_fixture
+from .test_dbt_source_validation import operation, parquet_file
 
 env = env_fixture
 
@@ -118,12 +119,16 @@ def test_active_roots_resolver_ignores_disabled_metrics_and_binds_defaults(env):
         "compacted": env["WINTAP_DBT_RAW_SENSOR_DATASET"] + "/compacted",
     }
     env["WINTAP_DBT_PROCESS_ENTITY_ROOT"] = "/synthetic/entities"
-    assert (
-        CONFIG.effective_input_roots(env)["metrics"]
-        == env["WINTAP_DBT_PROCESSING_METRICS_ROOT"]
-    )
+    assert CONFIG.effective_input_roots(env)["metrics"] == env["WINTAP_DBT_PROCESSING_METRICS_ROOT"]
     env["WINTAP_DBT_PROCESSING_METRICS_ROOT"] = ""
     assert (
         CONFIG.effective_input_roots(env)["metrics"]
         == env["WINTAP_DBT_RAW_SENSOR_DATASET"] + "/processing_metrics"
     )
+
+
+def test_active_roots_resolver_can_disable_uninitialized_compacted_input(env):
+    env["WINTAP_DBT_INCLUDE_COMPACTED"] = "false"
+    assert CONFIG.effective_input_roots(env) == {
+        "raw": env["WINTAP_DBT_RAW_SENSOR_DATASET"] + "/raw_sensor"
+    }

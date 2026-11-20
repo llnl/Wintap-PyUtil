@@ -18,9 +18,21 @@
     {{ return(var('compacted_root', '').rstrip('/') or raw_sensor_dataset_path() ~ '/compacted') }}
 {%- endmacro %}
 
+{# Whether the optional compactor output should participate in this DBT run. #}
+{% macro include_compacted_input() -%}
+    {%- set value = env_var('WINTAP_DBT_INCLUDE_COMPACTED', 'true') | lower | trim -%}
+    {%- if value not in ['1', 'true', 'yes', 'on', '0', 'false', 'no', 'off'] -%}
+        {{ exceptions.raise_compiler_error('WINTAP_DBT_INCLUDE_COMPACTED must be true or false') }}
+    {%- endif -%}
+    {{ return(value in ['1', 'true', 'yes', 'on']) }}
+{%- endmacro %}
+
 {# Resolve active roots before S3 setup; disabled metrics are not an input. #}
 {% macro active_input_roots() -%}
-    {% set roots = [raw_sensor_dataset_path() ~ '/raw_sensor', compacted_root_path()] %}
+    {% set roots = [raw_sensor_dataset_path() ~ '/raw_sensor'] %}
+    {% if include_compacted_input() %}
+        {% do roots.append(compacted_root_path()) %}
+    {% endif %}
     {% set entity = env_var('WINTAP_DBT_PROCESS_ENTITY_ROOT', '').rstrip('/') %}
     {% if entity %}
         {% do roots.extend([entity, processing_metrics_root()]) %}
@@ -29,7 +41,11 @@
 {%- endmacro %}
 
 {% macro raw_event_input_paths(event_type) -%}
-    {{ return([raw_sensor_path(event_type), compacted_root_path() ~ '/' ~ event_type]) }}
+    {% set paths = [raw_sensor_path(event_type)] %}
+    {% if include_compacted_input() %}
+        {% do paths.append(compacted_root_path() ~ '/' ~ event_type) %}
+    {% endif %}
+    {{ return(paths) }}
 {%- endmacro %}
 
 {# Build a recursive parquet glob for one raw_sensor event type. #}

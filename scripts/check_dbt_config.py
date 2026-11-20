@@ -36,9 +36,7 @@ def source_type(source):
             )
         return "s3"
     if "://" in source:
-        raise ValueError(
-            "Unsupported raw source URI; use a local path or s3://bucket[/prefix]"
-        )
+        raise ValueError("Unsupported raw source URI; use a local path or s3://bucket[/prefix]")
     return "local"
 
 
@@ -65,25 +63,26 @@ def validate(env, output_only=False):
         raise ValueError("WINTAP_DBT_RAW_SENSOR_DATASET must not be empty")
     kind = source_type(source)
     active = effective_input_roots(env)
-    compacted = active["compacted"]
-    compacted_kind = source_type(compacted)
     raw = active["raw"]
+    compacted = active.get("compacted")
+    compacted_kind = source_type(compacted) if compacted else None
     # Do not accidentally read one namespace twice through overlapping roots.
+    root_specs = [(raw, kind)]
+    if compacted:
+        root_specs.append((compacted, compacted_kind))
     roots = [
         str(Path(root).resolve()) if root_kind == "local" else root
-        for root, root_kind in ((raw, kind), (compacted, compacted_kind))
+        for root, root_kind in root_specs
     ]
-    a, b = (root.rstrip("/") + "/" for root in roots)
-    if a.startswith(b) or b.startswith(a):
-        raise ValueError("Raw and compacted input roots must not overlap")
+    for index, left in enumerate(roots):
+        for right in roots[index + 1 :]:
+            a, b = left.rstrip("/") + "/", right.rstrip("/") + "/"
+            if a.startswith(b) or b.startswith(a):
+                raise ValueError("Raw and compacted input roots must not overlap")
     entity = active.get("entity", "")
-    identity_policy = env.get(
-        "WINTAP_DBT_PROCESS_UNKNOWN_IDENTITY_POLICY", "reject"
-    ).strip()
+    identity_policy = env.get("WINTAP_DBT_PROCESS_UNKNOWN_IDENTITY_POLICY", "reject").strip()
     if identity_policy not in {"reject", "quarantine"}:
-        raise ValueError(
-            "WINTAP_DBT_PROCESS_UNKNOWN_IDENTITY_POLICY must be reject or quarantine"
-        )
+        raise ValueError("WINTAP_DBT_PROCESS_UNKNOWN_IDENTITY_POLICY must be reject or quarantine")
     identity_max_ratio_text = env.get(
         "WINTAP_DBT_PROCESS_UNKNOWN_IDENTITY_MAX_RATIO", "0.05"
     ).strip()
@@ -103,22 +102,16 @@ def validate(env, output_only=False):
         for other in roots:
             a, b = entity_path.rstrip("/") + "/", other.rstrip("/") + "/"
             if a.startswith(b) or b.startswith(a):
-                raise ValueError(
-                    "Process entity root must not overlap raw/compacted inputs"
-                )
+                raise ValueError("Process entity root must not overlap raw/compacted inputs")
         hosts = required(env, "WINTAP_DBT_PROCESS_ENTITY_HOSTS").split(",")
         if any(not h.strip() for h in hosts):
-            raise ValueError(
-                "Expected entity hosts must be a nonempty comma-separated list"
-            )
+            raise ValueError("Expected entity hosts must be a nonempty comma-separated list")
         required(env, "WINTAP_DBT_PROCESS_ENTITY_NAMESPACE")
         if entity_kind == "local" and not Path(entity).is_dir():
             raise ValueError("Process entity root does not exist")
         metrics = active["metrics"]
         metrics_kind = source_type(metrics)
-        metrics_path = (
-            str(Path(metrics).resolve()) if metrics_kind == "local" else metrics
-        )
+        metrics_path = str(Path(metrics).resolve()) if metrics_kind == "local" else metrics
         for other in [*roots, entity_path]:
             a, b = metrics_path.rstrip("/") + "/", other.rstrip("/") + "/"
             if a.startswith(b) or b.startswith(a):
@@ -128,7 +121,7 @@ def validate(env, output_only=False):
         if metrics_kind == "local" and not Path(metrics).is_dir():
             raise ValueError("Processing metrics root does not exist")
     present = False
-    for root, root_kind in ((raw, kind), (compacted, compacted_kind)):
+    for root, root_kind in root_specs:
         if root_kind == "s3":
             present = True  # Actual S3 existence/access is checked by DBT.
         elif Path(root).exists():
@@ -136,9 +129,7 @@ def validate(env, output_only=False):
                 raise ValueError(f"Local raw source directory is not readable: {root}")
             present = True
     if not present:
-        raise ValueError(
-            f"Local raw source directory does not exist: {raw} or {compacted}"
-        )
+        raise ValueError(f"Local raw source directory does not exist: {raw} or {compacted}")
 
     bounds = []
     for edge, default_hour in (("START", "00"), ("END", "23")):
@@ -147,7 +138,7 @@ def validate(env, output_only=False):
         if not re.fullmatch(r"[0-9]{8}", day):
             extra = (
                 "; S3 requires explicit partition dates"
-                if "s3" in (kind, compacted_kind)
+                if "s3" in {root_kind for _, root_kind in root_specs}
                 else ""
             )
             raise ValueError(f"{name} must be YYYYMMDD{extra}")

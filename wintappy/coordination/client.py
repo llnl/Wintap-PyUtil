@@ -52,6 +52,27 @@ def coordinated_inputs(env):
     )
 
 
+def direct_dbt_requested(env):
+    """Return whether the caller explicitly requested an uncoordinated DBT run."""
+    mode = env.get("WINTAP_DBT_COORDINATION_MODE", "").strip().lower()
+    if mode not in {"", "direct"}:
+        raise CoordinationError("WINTAP_DBT_COORDINATION_MODE must be unset or direct")
+    if mode != "direct":
+        return False
+    if env.get("WINTAP_DBT_PROCESS_ENTITY_ROOT", "").strip():
+        raise CoordinationError(
+            "Direct DBT mode does not support process-entity enrichment; use the coordinated reader"
+        )
+    if env.get("WINTAP_DBT_INCLUDE_COMPACTED", "true").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }:
+        raise CoordinationError("Direct DBT mode requires WINTAP_DBT_INCLUDE_COMPACTED=false")
+    return True
+
+
 def _now():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -512,11 +533,12 @@ def main(argv=None):
         parser.error("Unexpected command arguments")
     outstanding_job_id = None
     try:
-        if args.action not in {
-            "retry-terminal",
-            "shared-command",
-        } and not coordinated_inputs(os.environ):
-            # No SDK/ledger/client-state initialization on entirely local input roots.
+        if args.action not in {"retry-terminal", "shared-command"} and (
+            direct_dbt_requested(os.environ) or not coordinated_inputs(os.environ)
+        ):
+            # Direct mode is an explicit operator choice for a read-only DBT run
+            # before coordination/compaction has been initialized. The normal
+            # remote route remains coordinated unless this switch is present.
             return _dbt_run(args.action, shlex.split(args.dbt_command), args.dbt_project)
         from .service import open_message_store
 

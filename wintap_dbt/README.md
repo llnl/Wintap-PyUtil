@@ -122,8 +122,26 @@ You can still export any of those variables to override the defaults. DBT itself
 
 For split I/O, keep `WINTAP_DBT_DATABASE` local and point `WINTAP_DBT_RAW_SENSOR_DATASET` at the parquet dataset root that contains `raw_sensor/`. If that raw dataset lives on S3, the dbt DuckDB profile now loads `httpfs` and configures an S3 secret from the usual AWS environment variables. Set `AWS_PROFILE` to select a named shared AWS profile; DBT passes it explicitly to DuckDB's credential-chain secret. DuckDB does not copy a profile's custom `endpoint_url` into the secret, so Garage/path-style users must also set `AWS_ENDPOINT_URL`, `AWS_DEFAULT_REGION` or `AWS_REGION`, and `DUCKDB_USE_SSL` to match that endpoint.
 
-Date discovery uses **both effective local input roots**, not the output root.
-S3 setup considers raw, compacted, entity and **active** processing-metrics roots.
+For a new S3 dataset before compaction and coordination have been initialized, use
+the explicit read-only path:
+
+```sh
+make dbt-build-direct \
+  WINTAP_DBT_RAW_SENSOR_DATASET=s3://bucket/dataset \
+  WINTAP_DBT_START_DAY=YYYYMMDD \
+  WINTAP_DBT_END_DAY=YYYYMMDD
+```
+
+This target sets `WINTAP_DBT_COORDINATION_MODE=direct` and
+`WINTAP_DBT_INCLUDE_COMPACTED=false`, runs the same source preflight, and then
+runs DBT without initializing or opening coordination state. It is intended only
+when no compactor or other writer can modify the selected raw partitions. It
+refuses process-entity enrichment; use the coordinated reader for that mode.
+The normal `make dbt-build` route remains coordinated for remote inputs.
+
+Date discovery uses the **effective local input roots**, not the output root.
+S3 setup considers raw, optionally compacted, entity and **active**
+processing-metrics roots.
 With an empty entity root, metrics are not an input: even an inherited remote
 metrics override is ignored by offline validation and DBT access setup. Ordinary
 local-only `make dbt-build` remains direct, without AWS credentials, coordination,
@@ -170,6 +188,8 @@ The compacted root defaults to `s3://lintap-alpha/lintap/compacted/...`.
 `WINTAP_DBT_COMPACTED_ROOT` can override that **direct event root**, without any
 extra `raw_sensor/` directory. Both roots may be local or S3; they must not overlap.
 If either is remote, supply explicit dates and configure S3 access.
+`WINTAP_DBT_INCLUDE_COMPACTED=false` disables compacted input probing for a
+raw-only run. It is set automatically by `make dbt-build-direct`.
 
 ### Compaction migration contract
 
