@@ -82,8 +82,11 @@ tramp
 wintappy_settings.toml*
 wintap-run.env
 
-# uv lockfile is generated locally until dependency pinning policy is finalized.
+# Track the exact main/standalone qualification locks; ignore other local locks.
 uv.lock
+!/uv.lock
+!/extras/raw-sensor-compact/uv.lock
+/extras/raw-sensor-compact/.ruff_cache/
 
 # DBT artifacts and local databases
 dbt/logs/dbt.log

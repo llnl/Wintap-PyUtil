@@ -1,10 +1,11 @@
+{% set entity_mode = env_var is defined and env_var('WINTAP_DBT_PROCESS_ENTITY_ROOT', '') != '' %}
 with process_base as (
     select
         p.pidhash pid_hash,
         any_value('windows') os_family,
         any_value(agentid) agent_id,
         count(distinct agentid) num_agent_id,
-        any_value(p.hostname) hostname,
+        {% if entity_mode %}p.hostname{% else %}any_value(p.hostname){% endif %} hostname,
         any_value(pid) os_pid,
         any_value(case when p.processname = '' then null else p.processname end) process_name,
         count(distinct p.processname) num_process_name,
@@ -43,7 +44,18 @@ with process_base as (
         sum(case when upper(p.activitytype) = 'STOP' then 1 else 0 end) num_process_stop
     from {{ ref('stg_raw_process') }} p
     group by all
-), with_filename as (
+){% if entity_mode %}, enriched as (
+    select p.* replace (
+        e.parent_pid_hash as parent_pid_hash,
+        e.parent_os_pid as parent_os_pid,
+        coalesce(e.process_name, p.process_name) as process_name,
+        coalesce(e.process_path, p.process_path) as process_path,
+        coalesce(e.user_name, p.user_name) as user_name,
+        coalesce(e.args, p.args) as args
+    ), e.parent_status, e.identity_conflict, e.metadata_conflict, e.from_store as entity_enriched
+    from process_base p left join {{ ref('process_entities') }} e
+        on upper(trim(p.hostname))=e.hostname and p.pid_hash=e.pid_hash
+){% endif %}, with_filename as (
     select
         *,
         case
@@ -51,7 +63,7 @@ with process_base as (
             when substring(process_path, -1) = '\\' then concat(process_path, process_name)
             else process_path
         end filename
-    from process_base
+    from {% if entity_mode %}enriched{% else %}process_base{% endif %}
 ), with_file_id as (
     select
         *,

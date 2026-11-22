@@ -4,7 +4,11 @@
         {{ return('') }}
     {%- endif -%}
     {% do configure_raw_sensor_access() %}
-    {%- set source = raw_sensor_dataset_path() -%}
+    {% do validate_process_entities() %}
+    {%- set source = raw_sensor_dataset_path() ~ '/raw_sensor' -%}
+    {%- if include_compacted_input() -%}
+        {%- set source = source ~ ' + ' ~ compacted_root_path() -%}
+    {%- endif -%}
     {% do log('Checking raw source: ' ~ source ~ ' window ' ~ var('start_day') ~ '/' ~ start_hour_pk() ~ ' through ' ~ var('end_day') ~ '/' ~ end_hour_pk(), info=true) %}
     {%- set ns = namespace(sample=none) -%}
     {# Keep event names before the first wildcard so S3 LIST stays partition-scoped.

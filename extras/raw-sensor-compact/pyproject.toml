@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "raw-sensor-compact"
+version = "0.1.0"
+description = "Partition-scoped raw_sensor Parquet compaction and row-count validation"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["duckdb==2.0.0", "boto3>=1.40,<2"]
+
+[project.scripts]
+raw-sensor-compact = "raw_sensor_compact.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8,<10", "ruff>=0.14,<1"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["s3: opt-in isolated S3 transport tests"]
+
+[tool.ruff]
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B"]

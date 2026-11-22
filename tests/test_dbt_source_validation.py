@@ -196,9 +196,14 @@ def test_make_s3_print_and_target_dependencies(env):
         ["make", "-n", "dbt-build"], cwd=ROOT, env=env, capture_output=True, text=True, timeout=10
     )
     assert build.returncode == 0, build.stderr
-    assert build.stdout.index("run-operation validate_raw_sensor_source") < build.stdout.index(
-        "dbt build"
-    )
+    assert "wintappy.coordination.client" in build.stdout
+    assert "dbt-build" in build.stdout
+    # Preflight and build now share one reader lifetime, not separate Make recipes.
+    from wintappy.coordination.client import _dbt_commands
+
+    commands = _dbt_commands("dbt-build", ["dbt"], "wintap_dbt")
+    assert commands[0][:3] == ["dbt", "run-operation", "validate_raw_sensor_source"]
+    assert commands[1][:2] == ["dbt", "build"]
     dashboard = subprocess.run(
         ["make", "-n", "qa-dashboard"],
         cwd=ROOT,
@@ -209,6 +214,17 @@ def test_make_s3_print_and_target_dependencies(env):
     )
     assert "--output-only" in dashboard.stdout
     assert "run-operation" not in dashboard.stdout
+    direct = subprocess.run(
+        ["make", "-n", "dbt-build-direct"],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert direct.returncode == 0, direct.stderr
+    assert "WINTAP_DBT_COORDINATION_MODE=direct" in direct.stdout
+    assert "WINTAP_DBT_INCLUDE_COMPACTED=false" in direct.stdout
 
 
 def test_unreadable_local_input(env, monkeypatch):
@@ -259,7 +275,16 @@ def test_local_dbt_preflight(env, tmp_path, scenario):
 
 @pytest.mark.parametrize(
     "scenario",
-    ["valid", "hour-window", "profile", "empty", "list-denied", "read-denied", "tls-error"],
+    [
+        "valid",
+        "raw-only",
+        "hour-window",
+        "profile",
+        "empty",
+        "list-denied",
+        "read-denied",
+        "tls-error",
+    ],
 )
 def test_s3_dbt_preflight(env, tmp_path, scenario):
     """Real DuckDB httpfs against a private loopback S3 protocol fixture, not live S3."""
@@ -352,6 +377,8 @@ def test_s3_dbt_preflight(env, tmp_path, scenario):
         env.update(
             WINTAP_DBT_START_HOUR="09", WINTAP_DBT_END_DAY="20261031", WINTAP_DBT_END_HOUR="09"
         )
+    elif scenario == "raw-only":
+        env["WINTAP_DBT_INCLUDE_COMPACTED"] = "false"
     elif scenario == "tls-error":
         env["DUCKDB_USE_SSL"] = "true"
     try:
@@ -379,6 +406,10 @@ def test_s3_dbt_preflight(env, tmp_path, scenario):
         assert any("/lintap-alpha/" in path for _, path in requests)
         if scenario == "profile":
             assert any("Credential=profile-key/" in header for header in authorization_headers)
+    elif scenario == "raw-only":
+        assert result.returncode == 0, output
+        assert "Raw source check passed" in output
+        assert all("/compacted/" not in path for _, path in requests)
     else:
         assert result.returncode != 0, output
         assert ("No input found" if scenario == "empty" else "403") in output

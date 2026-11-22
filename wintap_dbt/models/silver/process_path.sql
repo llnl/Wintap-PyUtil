@@ -1,3 +1,4 @@
+{% set entity_mode = env_var is defined and env_var('WINTAP_DBT_PROCESS_ENTITY_ROOT', '') != '' %}
 select * from (
     with recursive cte_process_tree (
         agent_id,
@@ -44,17 +45,22 @@ select * from (
             cast(pt.ptree || '->' || p.process_name as varchar),
             list_append(pt.ptree_list, p.pid_hash),
             list_append(pt.ptree_list_tuples, { 'pid_hash': p.pid_hash, 'process_name': p.process_name })
-        from {{ ref('process') }} as p,
+        from {{ ref('process_context') if entity_mode else ref('process') }} as p,
             cte_process_tree as pt
         where
             p.pid_hash = pt.parent_pid_hash
             and pt.parent_pid_hash != pt.pid_hash
             and not list_contains(pt.ptree_list, p.pid_hash)
-            and p.hostname = pt.hostname
+            and p.hostname = {% if entity_mode %}upper(trim(pt.hostname)){% else %}pt.hostname{% endif %}
+            {% if entity_mode %}
+            and not coalesce(p.identity_conflict, false)
+            and p.context_status != 'missing_entity'
+            and (pt.parent_os_pid is null or p.os_pid=pt.parent_os_pid)
+            {% endif %}
     )
     select
         *,
-        max(level) over (partition by pid_hash) as max_level
+        max(level) over (partition by {% if entity_mode %}hostname, {% endif %}pid_hash) as max_level
     from cte_process_tree
 )
 where max_level = level

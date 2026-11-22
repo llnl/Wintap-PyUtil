@@ -5,8 +5,7 @@
 
 {# Return a real raw scan when the event directory exists, else a typed empty select. #}
 {% macro optional_empty_raw_model(event_type, empty_select_sql) -%}
-    {%- set path = raw_sensor_path(event_type) -%}
-    {%- set exists = modules.os.path.isdir(path) -%}
+    {%- set exists = raw_event_exists(event_type) -%}
     {%- if exists -%}
         select *
         from {{ parquet_relation(event_type) }}

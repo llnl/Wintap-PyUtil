@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "binding": {
+    "dataset_id": "research-dataset",
+    "roots": {
+      "raw": "s3://example-bucket/research-dataset/raw_sensor",
+      "compacted": "s3://example-bucket/research-dataset/compacted"
+    },
+    "entity": null
+  },
+  "coordination_root": "s3://example-bucket/coordination/research-dataset",
+  "state_directory": "/var/lib/wintap-coordination",
+  "first_hour": "2026-01-01T00:00:00Z",
+  "storage": { "profile": "configured-profile" },
+  "writer": {
+    "project": "/opt/wintap-pyutil/extras/raw-sensor-compact",
+    "executable": "/opt/wintap-pyutil/extras/raw-sensor-compact/.venv/bin/python",
+    "event_types": ["raw_process"],
+    "target_size_bytes": 134217728,
+    "temp_directory": "/var/tmp/wintap-compaction-spill",
+    "run_evidence_directory": "/var/lib/wintap-compaction-evidence",
+    "profile": "configured-profile",
+    "grace_minutes": 10,
+    "max_hours": 1,
+    "threads": 2,
+    "memory_limit": "1GB",
+    "max_temp_size": "1GB",
+    "timeout": 300,
+    "supervision_timeout_seconds": 3600,
+    "delete_source": true
+  }
+}

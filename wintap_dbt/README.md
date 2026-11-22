@@ -4,11 +4,99 @@ DBT/DuckDB implementation of the canonical Wintap/Lintap post-processing pipelin
 
 ## Scope
 
-Input is canonical `raw_sensor` parquet:
+### Durable process context
+
+Optional first-round ancestry enrichment reads compactor-maintained S3 Parquet
+snapshots independently of the analysis window:
+
+```bash
+export WINTAP_DBT_PROCESS_ENTITY_ROOT=s3://bucket/dataset/process_entities
+export WINTAP_DBT_PROCESS_ENTITY_HOSTS=HOST-A,HOST-B
+export WINTAP_DBT_PROCESS_ENTITY_NAMESPACE=pid-v2-dataset-one
+export WINTAP_DBT_PROCESS_UNKNOWN_IDENTITY_POLICY=reject
+export WINTAP_DBT_PROCESS_UNKNOWN_IDENTITY_MAX_RATIO=0.05
+export WINTAP_DBT_PROCESSING_METRICS_ROOT=s3://bucket/dataset/processing_metrics
+```
+
+All three settings are required together. Initialize historical state first with
+the [standalone entity manager](../extras/raw-sensor-compact/README.md#durable-process-entities-round-one).
+Use one writer per dataset and **pause it for the entire DBT build**, not just
+preflight. Fixed files have no multi-host snapshot transaction. Missing expected
+files, incompatible schema/host/namespace, invalid JSON evidence, contradictory
+stored parent scalars, missing processing metrics, or uncovered `raw_process` hours
+fail preflight. No automatic empty-state fallback. The metrics root defaults to the
+`processing_metrics` sibling of `WINTAP_DBT_RAW_SENSOR_DATASET`.
+
+Preflight also requires the entity root's version-1 Parquet generation journal
+(`_authority/authority.parquet`) and version-4 hourly coverage. It verifies the
+unbroken committed receipt chain, all effective roots/expected hosts/policy and
+original per-host bootstrap declarations, then compares the current snapshots to
+the latest aggregate semantic identities. Historical checkpoints match their own
+committed generation, not today's hash. Pending publication intent, rollback with
+retained authority, arbitrary replacement and altered receipt/coverage evidence
+fail closed. Existing current-window evidence is still read before maintenance
+catches up; coverage is not a fingerprint comparison with the live raw inventory.
+
+Legacy state needs an explicit fresh entity **and metrics** root rebuild and paired
+configuration cutover under operator exclusion; preserve the old evidence. See the
+manager's [upgrade/recovery contract](../extras/raw-sensor-compact/README.md#bootstrap-and-hourly-operation).
+These receipts do not certify raw deletion or detect self-consistent rollback of
+the entire authority store without an independent ledger/operator high-water mark.
+For checkpoint failure after deletion, the standalone worker's opt-in local run
+archive retains original migration evidence independently of coverage. Exclusive
+`checkpoints-repair` verifies that archive and surviving data, then republishes the
+original historical-generation candidates without entity replay. It does not
+reopen a coordination ledger; missing evidence remains blocked. See
+[independent evidence and repair](../extras/raw-sensor-compact/README.md#independent-run-evidence-and-checkpoint-repair).
+
+`WINTAP_DBT_PROCESS_UNKNOWN_IDENTITY_POLICY` defaults to `reject` and must match
+the writer policy recorded in every checkpoint. `quarantine` is an explicit
+exception: unknown-identity raw evidence remains available to bronze/raw QA but
+is not loaded into durable entity state. Checkpoint exclusion counts, reasons,
+hosts and fingerprints are retained for review. Quarantine is bounded by the
+writer's per-hour `WINTAP_DBT_PROCESS_UNKNOWN_IDENTITY_MAX_RATIO` ceiling,
+which defaults to 0.05; DBT requires the configured ceiling, numerator,
+denominator and ratio to match each checkpoint. Quarantine does not repair keys
+or create ancestors.
+
+`stg_process_entities` materializes the validated state and bootstrap provenance.
+`process_entities` resolves paired parents from retained plus current-window
+evidence; contradictory real parents remain unresolved rather than ANY_VALUE.
+`process_context` contains window lifecycle/activity keys and known ancestor closure;
+`context_only`, `activity_only`, `metadata_conflict`, `from_store`, `bootstrap_start`
+and `context_status` distinguish origin/quality. Activity-only references are not
+new Starts, and context-only ancestors are not additional summary seeds.
+
+`process` keeps its window population, counters and timing metrics, but uses
+resolved parent pairs and deterministic display context. Windowed output preserves
+original hostname spelling for existing host/summary joins; only durable lookup
+predicates normalize it. `process_path` keeps
+window seeds and traverses the separate context lookup. `process_ancestry_quality`
+reports root reached, missing parent/ancestor, sentinel, conflicts, PID mismatch
+and cycles; longest available chain alone is not completeness. Accepted roots
+require consistent recorded self-parent identities and the declared
+`WINTAP_DBT_PROCESS_ROOT_PIDS` set (default `0,1,4`; restrict for the dataset/OS).
+Other self-links are cycles. The PID set never creates or repairs parent edges.
+
+Bronze raw observations, duplicate accounting and raw/compacted UNION ALL remain
+unchanged. Disable the root to retain the original model behavior. In enabled mode,
+display/parent results and additional quality columns intentionally differ from
+the legacy model. Parent-context enrichment is not a general rewrite of all
+downstream ANY_VALUE/grouping behavior or arbitrary historical as-of metadata.
+
+Snapshots retain all known instances/no initial GC. Bootstrap start is a declared
+initialization window, not proof of complete archive coverage. Never-collected
+or conflicting evidence remains a visible ancestry gap. Processing metrics are
+operational checkpoints, not telemetry facts; they record successful entity-enabled
+processing and make missed/fallback hours visible to DBT and monitoring. Large-host
+capacity and production scheduler exclusion must be reviewed before deployment.
+
+Input is the name-aligned union of remaining `raw_sensor` and validated `compacted` parquet:
 
 ```text
 <dataset>/raw_sensor/<event_type>/dayPK=YYYYMMDD/hourPK=HH/*.parquet
 <dataset>/raw_sensor/raw_process_conn_incr/dayPK=YYYYMMDD/hourPK=HH/protoPK=tcp|udp/*.parquet
+<dataset>/compacted/<event_type>/dayPK=YYYYMMDD/hourPK=HH[/protoPK=...]/<merged>.parquet
 ```
 
 ## Configuration
@@ -24,6 +112,7 @@ With the Makefile, DBT-specific values are derived from that root when unset:
 ```text
 WINTAP_DBT_DATASET=$WINTAP_DATA_ROOT
 WINTAP_DBT_RAW_SENSOR_DATASET=$WINTAP_DBT_DATASET
+WINTAP_DBT_COMPACTED_ROOT=$WINTAP_DBT_RAW_SENSOR_DATASET/compacted
 WINTAP_DBT_DATABASE=$WINTAP_DATA_ROOT/duckdb/wintap.duckdb
 WINTAP_DBT_START_DAY=<minimum discovered dayPK>
 WINTAP_DBT_END_DAY=<maximum discovered dayPK>
@@ -33,9 +122,45 @@ You can still export any of those variables to override the defaults. DBT itself
 
 For split I/O, keep `WINTAP_DBT_DATABASE` local and point `WINTAP_DBT_RAW_SENSOR_DATASET` at the parquet dataset root that contains `raw_sensor/`. If that raw dataset lives on S3, the dbt DuckDB profile now loads `httpfs` and configures an S3 secret from the usual AWS environment variables. Set `AWS_PROFILE` to select a named shared AWS profile; DBT passes it explicitly to DuckDB's credential-chain secret. DuckDB does not copy a profile's custom `endpoint_url` into the secret, so Garage/path-style users must also set `AWS_ENDPOINT_URL`, `AWS_DEFAULT_REGION` or `AWS_REGION`, and `DUCKDB_USE_SSL` to match that endpoint.
 
-Date discovery uses the **effective local raw input root**, not the output root.
+For a new S3 dataset before compaction and coordination have been initialized, use
+the explicit read-only path:
+
+```sh
+make dbt-build-direct \
+  WINTAP_DBT_RAW_SENSOR_DATASET=s3://bucket/dataset \
+  WINTAP_DBT_START_DAY=YYYYMMDD \
+  WINTAP_DBT_END_DAY=YYYYMMDD
+```
+
+This target sets `WINTAP_DBT_COORDINATION_MODE=direct` and
+`WINTAP_DBT_INCLUDE_COMPACTED=false`, runs the same source preflight, and then
+runs DBT without initializing or opening coordination state. It is intended only
+when no compactor or other writer can modify the selected raw partitions. It
+refuses process-entity enrichment; use the coordinated reader for that mode.
+The normal `make dbt-build` route remains coordinated for remote inputs.
+
+Date discovery uses the **effective local input roots**, not the output root.
+S3 setup considers raw, optionally compacted, entity and **active**
+processing-metrics roots.
+With an empty entity root, metrics are not an input: even an inherited remote
+metrics override is ignored by offline validation and DBT access setup. Ordinary
+local-only `make dbt-build` remains direct, without AWS credentials, coordination,
+a compacted directory, compactor installation or entity initialization. When
+entity mode is enabled, an empty metrics override uses the default sibling root.
 S3 input requires explicit `WINTAP_DBT_START_DAY` and `WINTAP_DBT_END_DAY`.
 No local `raw_sensor/` placeholder or downloaded copy is required for S3:
+
+**Linux coordination integration:** Make's source/build/test/docs/debug targets now
+route active S3 inputs through the shared-reader client. Set the exact matching
+`WINTAP_COORDINATION_DATASET_ID`, separate `WINTAP_COORDINATION_ROOT`, and a local
+`WINTAP_COORDINATION_CLIENT_STATE` directory before these targets. The build keeps
+source preflight and DBT execution inside one grant; direct local inputs still run
+ordinary DBT without initializing coordination. See
+[Linux setup and limits](../wintappy/coordination/LINUX.md).
+The S3 settings below configure data access only, not the required coordinator.
+Actual endpoint/resource qualification and partial-run recovery remain open; do not
+install production scheduling. Native-Mac coordinated readers refuse until their
+separate shutdown backend is qualified; local DBT is unaffected.
 
 ```sh
 export WINTAP_DATA_ROOT="$HOME/wintap-analysis/rhel8"
@@ -59,11 +184,36 @@ make dbt-build
 
 The raw root above resolves to `s3://lintap-alpha/lintap/raw_sensor/...`;
 do not append `raw_sensor` or an event name to the configured root.
+The compacted root defaults to `s3://lintap-alpha/lintap/compacted/...`.
+`WINTAP_DBT_COMPACTED_ROOT` can override that **direct event root**, without any
+extra `raw_sensor/` directory. Both roots may be local or S3; they must not overlap.
+If either is remote, supply explicit dates and configure S3 access.
+`WINTAP_DBT_INCLUDE_COMPACTED=false` disables compacted input probing for a
+raw-only run. It is set automatically by `make dbt-build-direct`.
+
+### Compaction migration contract
+
+Input discovery, event/alias and optional-column checks include both roots, with
+matching day/hour globs and nested protocol leaves. Missing roots/optional families
+are allowed; a requested supported event with no files anywhere still fails the
+source preflight. `parquet_scan(..., union_by_name=true)` preserves duplicate rows
+and fills missing fields with NULL. Existing model-specific normalization and
+duplicate accounting are unchanged; no new deduplication or compacted-preference
+rule hides overlap.
+
+Operate sequentially: **merge → validate → delete source hour prefix → DBT build**.
+The compactor's `--delete-source` uses the sensors' UTC upload-partition contract
+and a default 10-minute grace after hour end (minimum 5). Temporary overlap and
+partial deletion failures are accepted; reconcile failed hours manually before
+running DBT. Source deletion never runs for an already existing destination hour.
+Fresh databases are used in migration tests; rebuild affected materialized models
+after cutover. Bronze views capture discovered physical paths and should also be
+rebuilt after migration, not reused after their raw files have been deleted.
 
 ### Validation targets
 
-- `dbt-check-config`: offline source/configuration checks. Local raw input must
-  have a readable `raw_sensor/` directory; S3 requires a valid bucket/prefix URI,
+- `dbt-check-config`: offline source/configuration checks. Local input must
+  have a readable `raw_sensor/` or compacted directory; S3 requires a valid bucket/prefix URI,
   not a local directory. Other URI schemes are rejected. Dates/hours are checked,
   and the local DuckDB parent directory is created and checked for writability.
 - `print-dbt-config`: the same offline checks plus the effective raw source,
@@ -107,6 +257,7 @@ The DBT path is layered deliberately so the same models can read local parquet o
 - `WINTAP_DATA_ROOT` is the local run root used by the Makefile defaults.
 - `WINTAP_DBT_DATASET` is the general dataset root, defaulting to `$WINTAP_DATA_ROOT`.
 - `WINTAP_DBT_RAW_SENSOR_DATASET` optionally overrides only the raw parquet input root. Use this for split I/O, including S3-backed raw input with a local DuckDB output.
+- `WINTAP_DBT_COMPACTED_ROOT` overrides the direct compacted event root; default is `<raw_sensor_dataset>/compacted`.
 - `WINTAP_DBT_START_DAY` / `WINTAP_DBT_END_DAY` and optional `WINTAP_DBT_START_HOUR` / `WINTAP_DBT_END_HOUR` define the inclusive partition window.
 
 3. DBT vars
@@ -115,15 +266,16 @@ The DBT path is layered deliberately so the same models can read local parquet o
 
 - `dataset`
 - `raw_sensor_dataset`
+- `compacted_root`
 - `start_day`, `end_day`
 - `start_hour`, `end_hour`
 
 4. Shared macros
 
-- `macros/paths.sql` turns `raw_sensor_dataset` plus the day/hour window into canonical `raw_sensor/...` globs and SQL predicates.
+- `macros/paths.sql` turns both roots plus the day/hour window into `raw_sensor/...` and `compacted/...` globs and SQL predicates.
 - `macros/raw_sources.sql` adds optional-event and alias helpers such as `raw_event_exists()` and `raw_scan_for()`.
 - `macros/relations.sql` wraps the final `parquet_scan(...)` shape used by raw models.
-- `macros/s3.sql` configures DuckDB S3 access on run start when `raw_sensor_dataset` points at `s3://...`.
+- `macros/s3.sql` configures DuckDB S3 access on run start when either input root points at `s3://...`.
 
 5. DBT model layers
 
@@ -224,7 +376,103 @@ Implemented:
 - This is not yet wired to a `wintap-etl` wrapper command.
 - Parquet export is not implemented yet; DBT builds into DuckDB.
 - Label/Sigma/MITRE/LOLBAS source loading is stubbed for now.
-- The historical `merged` flow is intentionally not supported here.
+- The historical `merged` binary/legacy layout remains unsupported; the new
+  `compacted/<event>/dayPK/hourPK/` Parquet layout is supported alongside raw input.
+
+### Migration tests
+
+Ordinary regressions: `uv run --locked --dev pytest tests`.
+Opt-in end-to-end local test uses this repository's standalone compactor on an isolated
+known-value fixture, builds the full graph in fresh databases for raw/mixed/compacted
+states, and compares model row counts and sorted-result SHA-256 (excluding only
+pidstat's derived source-object filename). It includes genuine duplicates, NULLs,
+column drift, UTC rollover, and separate TCP/UDP leaves:
+
+```sh
+RAW_COMPACT_DBT_TEST_APPROVED=isolated-local uv run --locked --dev pytest \
+  tests/test_compacted_inputs.py -s
+```
+
+`tests/test_compacted_s3_migration.py` requires explicit
+`RAW_COMPACT_DBT_TEST_APPROVED=isolated-s3-copy-delete` and an initially absent
+`RAW_COMPACT_DBT_TEST_ROOT=s3://lintap-alpha/compaction-tests/dbt-union-<unique>`.
+It copies the bounded qualified pidstat/host hour, exercises three fresh scoped
+DBT builds, deletes only test-copy prefixes and checks original source hashes.
+Never reuse an existing fixture root or point it at the live raw/compacted roots.
+
+Set `RAW_COMPACT_DBT_TEST_SCOPE=all-models` to copy every available DBT input
+family for the same 2026-11-11 08:00–09:00 UTC hour and build the entire graph
+in all three states. Optional absent families still produce their typed empty
+models. The fixture is bounded to 1,000 source files/256 MiB before any copies;
+invalid scopes fail rather than silently falling back to the smaller test.
+Comparison includes column names/types, row counts and sorted-result SHA-256,
+excluding only pidstat's derived filename. Source inventory, merge reports,
+per-state snapshots and the successful summary are saved under pytest's fixture
+directory. Production models are not normalized or relaxed for comparison.
+
+```sh
+RAW_COMPACT_DBT_TEST_APPROVED=isolated-s3-copy-delete \
+RAW_COMPACT_DBT_TEST_SCOPE=all-models \
+RAW_COMPACT_DBT_COMPARISON=any-value-diagnostics \
+RAW_COMPACT_DBT_TEST_ROOT=s3://lintap-alpha/compaction-tests/dbt-union-all-<unique> \
+uv run --locked --dev pytest tests/test_compacted_s3_migration.py -s
+```
+
+The initial full live qualification **failed strict result equivalence**, not DBT
+build/tests: the 399-file/9-family fixture passes 139 gates in raw and mixed
+states, but differs in 17 model snapshots. An unchanged-input rebuild passes
+139 gates and differs in 18 snapshots. Existing unordered `ANY_VALUE` selections
+in process models can change derived filenames/file IDs and downstream counts.
+The human accepts this existing quality debt as **non-blocking for compaction**.
+Use explicit `RAW_COMPACT_DBT_COMPARISON=any-value-diagnostics` with full scope:
+all model schemas/names and all bronze results must match exactly; models
+outside the manifest's ANY_VALUE-containing/dependent closure must also match.
+Differences in the closure are saved with counts/hashes as diagnostics, not
+discarded, normalized or claimed equivalent. Membership does not prove each
+difference's cause. Default comparison remains `strict`; unknown modes fail.
+Production representative semantics are unchanged and remain separate quality
+work. The initial `dbt-union-all-20261112-01` mixed inspection fixture retained
+394 raw objects plus compacted host during qualification; the approved comparison rerun used a new
+fixture root to repeat all three states and original hashes.
+
+Approved all-family rerun passed at
+`s3://lintap-alpha/compaction-tests/dbt-union-all-20261112-02`: 54 models and 139
+gates per state, all 11 bronze results/all model schemas exact, 2,668,265 source
+rows conserved, 399 copied sources deleted and 399 original hashes unchanged.
+Thirty-six model results match across every state; differences in 18 affected
+models are recorded as diagnostics. There are 10 compacted outputs across 9
+families, including separate TCP/UDP leaves. Registry/image-load inputs are absent.
+
+#### Read-only full-model test of the surviving compacted copy
+
+**Historical command:** on 2026-11-12 the human requested cleanup, and all
+fixtures created by this work were removed, including this compacted copy.
+The command below no longer has a live input dataset. For future testing, obtain
+approval for a fresh isolated fixture and substitute its root. Qualification
+results and local evidence are preserved; original raw telemetry is untouched.
+
+From the PyUtil repository, use your existing profile setup and a **fresh local
+database**, leaving the private environment file and existing databases unchanged:
+
+```sh
+source wintap-run.env-lintap-alpha
+export WINTAP_DATA_ROOT="$(mktemp -d)"
+export WINTAP_DBT_DATASET="$WINTAP_DATA_ROOT"
+export WINTAP_DBT_DATABASE="$WINTAP_DATA_ROOT/wintap.duckdb"
+export WINTAP_DBT_RAW_SENSOR_DATASET=s3://lintap-alpha/compaction-tests/dbt-union-all-20261112-02
+export WINTAP_DBT_COMPACTED_ROOT="$WINTAP_DBT_RAW_SENSOR_DATASET/compacted"
+export WINTAP_DBT_START_DAY=20261111 WINTAP_DBT_END_DAY=20261111
+export WINTAP_DBT_START_HOUR=08 WINTAP_DBT_END_HOUR=08
+uv run --locked --dev dbt build \
+  --project-dir wintap_dbt --profiles-dir wintap_dbt \
+  --target-path "$WINTAP_DATA_ROOT/target" \
+  --log-path "$WINTAP_DATA_ROOT/logs" --no-partial-parse
+```
+
+No `--select`: this builds/tests the full graph. It only reads S3 and writes
+local DBT output. Expect 139 successful gates, not stable hashes for existing
+ANY_VALUE representatives. Do not reuse this root for the write/delete regression,
+which requires an initially absent new fixture root.
 
 ### Combined-feature release follow-up
 
