@@ -3,6 +3,8 @@ import pytest
 
 from wintappy.config import EnvironmentConfig
 
+pytestmark = pytest.mark.unit
+
 class TestEnvironmentConfig:
     
     def _get_parser(self):

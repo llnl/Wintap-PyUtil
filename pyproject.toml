@@ -89,6 +89,10 @@ pretty = true
 [tool.pytest.ini_options]
 pythonpath = ["wintappy"]
 testpaths = ["tests"]
+markers = [
+    "unit: synthetic function/module tests without live datasets or services",
+    "contract: synthetic schema, SQL, CLI, or application-boundary tests",
+]
 
 [tool.sqlfluff.core]
 dialect = "duckdb"

@@ -117,6 +117,11 @@ Use DBT for new processing work.
 
 ## Development tasks
 
+For lightweight iterative checks, start with the partial
+[test inventory and focused commands](tests/README.md). Configuration tests now
+live under `tests/unit/config/`; four synthetic SQL modules have a `contract`
+marker. Full-suite default selection is unchanged.
+
 ```bash
 make fmt          # black + isort
 make fmt-check    # formatting checks

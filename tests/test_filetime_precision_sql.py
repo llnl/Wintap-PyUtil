@@ -5,6 +5,8 @@ import duckdb
 import jinja2
 import pytest
 
+pytestmark = pytest.mark.contract
+
 
 EPOCH = 116444736000000000
 MACROS = Path(__file__).resolve().parents[1] / 'wintap_dbt/macros/time.sql'
