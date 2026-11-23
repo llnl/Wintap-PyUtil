@@ -94,7 +94,7 @@ def fixture_queries():
     )
     network = (
         common
-        + ", '{proto}' Protocol, '{activity}' IpEvent, 134117856000000000::BIGINT FirstSeenMs, 134117856001000000::BIGINT LastSeenMs, '127.0.0.1' SourceIPAddressString, '127.0.0.2' DestinationIPAddressString, 2130706433::BIGINT LocalIpAddr, 2130706434::BIGINT RemoteIpAddr, '' LocalIpPrivateGateway, '' RemoteIpPrivateGateway, 1000 LocalPort, 2000 RemotePort, 2 EventCount, 10 PacketSize, 5 MinPacketSize, 5 MaxPacketSize, 50 PacketSizeSquared"
+        + ", 'producer-{proto}-connection' ConnId, '{proto}' Protocol, '{activity}' IpEvent, 134117856000000000::BIGINT FirstSeenMs, 134117856001000000::BIGINT LastSeenMs, '127.0.0.1' SourceIPAddressString, '127.0.0.2' DestinationIPAddressString, 2130706433::BIGINT LocalIpAddr, 2130706434::BIGINT RemoteIpAddr, '' LocalIpPrivateGateway, '' RemoteIpPrivateGateway, 1000 LocalPort, 2000 RemotePort, 2 EventCount, 10 PacketSize, 5 MinPacketSize, 5 MaxPacketSize, 50 PacketSizeSquared"
     )
     macip = "'test-agent' AgentId, 'test-host' Hostname, '' PrivateGateway, 2130706433::BIGINT IpAddr, '00:00:00:00:00:01' Mac, 1500 MTU, 1767225600::BIGINT EventTime"
     pidstat = "timestamp '2026-01-01 00:00:00' AS time, 1000 uid, 42 pid, 'worker' command, 'test-host' hostname, NULL::VARCHAR cgroup_path, 1::BIGINT pid_ns_inode, NULL::VARCHAR container_runtime, NULL::VARCHAR container_id"
@@ -141,6 +141,34 @@ def seed_fixture(directory):
                         "copy (" + query + ") to ? (format parquet)",
                         [str(leaf / f"host{i}.parquet")],
                     )
+
+
+def test_process_conn_dbt_build_preserves_producer_conn_id(env, tmp_path):
+    seed_fixture(tmp_path / "input/raw_sensor")
+    env.update(
+        WINTAP_DBT_START_DAY="20260101",
+        WINTAP_DBT_START_HOUR="23",
+        WINTAP_DBT_END_DAY="20260102",
+        WINTAP_DBT_END_HOUR="00",
+    )
+
+    build(
+        env,
+        tmp_path / "conn-id-build",
+        select=(
+            "stg_raw_process_conn_incr",
+            "process_conn_incr",
+            "process_conn_incr_conn_id_not_null",
+        ),
+    )
+
+    with duckdb.connect(env["WINTAP_DBT_DATABASE"], read_only=True) as conn:
+        assert conn.execute(
+            "select distinct conn_id from process_conn_incr order by conn_id"
+        ).fetchall() == [
+            ("producer-tcp-connection",),
+            ("producer-udp-connection",),
+        ]
 
 
 def test_existing_process_model_depends_on_row_order():

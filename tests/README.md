@@ -6,16 +6,17 @@ unchanged. Unclassified coordination, processing, platform, and evidence tests
 have not been moved or excluded. The isolated compactor and DBT SQL suites retain
 their own collection commands/environments.
 
-## Frozen slice (2026-11-22)
+## Classified slice (updated 2026-11-23)
 
 | File | Primary marker | Collected cases | Execution boundary |
 |---|---|---:|---|
 | `unit/config/test_config.py` (formerly `test_config.py`) | `unit` | 4 | Synthetic argument parsing; no external I/O. |
+| `test_rawutil_conn_id_passthrough.py` | `unit` | 2 | Mocked raw-view generation; producer `ConnId` passthrough and missing-`AgentId` compatibility. |
 | `test_filetime_precision_sql.py` | `contract` | 127 | Shipping SQL macros/models, in-memory DuckDB. |
 | `test_network_activity_sql.py` | `contract` | 76 | Shipping and legacy SQL against synthetic events. |
 | `test_process_gold_quality_sql.py` | `contract` | 8 | Shipping gold SQL and shared network fixtures. |
 | `test_selinux_sql.py` | `contract` | 9 | Synthetic normalization/attribution/counter contracts. |
-| **Total** | | **224** | **4 unit + 220 contract**; parametrized case counts, not function counts. |
+| **Total** | | **226** | **6 unit + 220 contract**; parametrized case counts, not function counts. |
 
 SQL files stay in place for this draft. They share relative imports, and
 `test_compacted_inputs.py` also imports the network renderer. A future relocation
@@ -27,7 +28,10 @@ Existing assertion bodies and fixtures are retained.
 Run from the PyUtil repository root in its existing development environment:
 
 ```bash
-.venv/bin/python -m pytest tests/unit/config -m unit --strict-markers -q
+.venv/bin/python -m pytest \
+  tests/unit/config \
+  tests/test_rawutil_conn_id_passthrough.py \
+  -m unit --strict-markers -q
 
 .venv/bin/python -m pytest \
   tests/test_filetime_precision_sql.py \
@@ -46,7 +50,7 @@ Run from the PyUtil repository root in its existing development environment:
   --strict-markers -q
 ```
 
-The last command runs **17 representative cases**, not all 224 collected cases.
+The last command runs **17 representative cases**, not all 226 collected cases.
 `uv run --locked --offline --no-sync --dev python` can replace `.venv/bin/python`
 when the existing environment is available. No dependency upgrade is part of this
 first cut. Keep the main DuckDB environment separate from the compactor project.
