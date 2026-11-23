@@ -345,10 +345,10 @@ ambiguous and unmatched observations remain visible without assigned ownership.
 five-tuple identity generator; DBT does not reorder endpoints or hash a replacement.
 `conn_id` identifies a context-qualified tuple, not one connection instance, so
 repeated uses of the same tuple share the key. The change from the temporary DBT
-hash back to producer IDs requires dependent models to be rebuilt together and
-downstream consumers to be reviewed before release. The synthetic real-DBT
-regression in `tests/test_compacted_inputs.py` verifies producer IDs survive
-bronze/silver materialization unchanged.
+hash back to producer IDs ships as a clean cutover to newly collected data; legacy
+and producer-derived populations are not migrated or combined. The synthetic
+real-DBT regression in `tests/test_compacted_inputs.py` verifies producer IDs
+survive bronze/silver materialization unchanged.
 
 ## Layers
 
