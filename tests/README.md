@@ -16,7 +16,8 @@ their own collection commands/environments.
 | `test_network_activity_sql.py` | `contract` | 76 | Shipping and legacy SQL against synthetic events. |
 | `test_process_gold_quality_sql.py` | `contract` | 8 | Shipping gold SQL and shared network fixtures. |
 | `test_selinux_sql.py` | `contract` | 9 | Synthetic normalization/attribution/counter contracts. |
-| **Total** | | **226** | **6 unit + 220 contract**; parametrized case counts, not function counts. |
+| `test_any_value_contract_sql.py` | `contract` | 6 | Column-specific ANY_VALUE invariance, conflict, pairing, and as-of contracts. |
+| **Total** | | **232** | **6 unit + 226 contract**; parametrized case counts, not function counts. |
 
 SQL files stay in place for this draft. They share relative imports, and
 `test_compacted_inputs.py` also imports the network renderer. A future relocation
@@ -38,6 +39,7 @@ Run from the PyUtil repository root in its existing development environment:
   tests/test_network_activity_sql.py \
   tests/test_process_gold_quality_sql.py \
   tests/test_selinux_sql.py \
+  tests/test_any_value_contract_sql.py \
   -m contract --strict-markers --collect-only -q
 
 .venv/bin/python -m pytest \
