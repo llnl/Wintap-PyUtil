@@ -144,16 +144,51 @@
     {%- endif -%}
 
     {%- set ns = namespace(existing_globs=[]) -%}
-    {%- for glob_path in requested_globs -%}
-        {%- set sql -%}
-            select count(*) as num_files
-            from glob('{{ glob_path | replace("'", "''") }}')
+    {%- if env_var('WINTAP_DBT_FAST_SOURCE_DISCOVERY', 'false') | lower in ['1', 'true', 'yes', 'on'] -%}
+        {#
+           Direct raw-only builds can use one recursive discovery per active
+           root.  The normal route retains partition-scoped LIST requests for
+           least-privilege S3 policies.  Final scans remain partition-scoped
+           in both modes.
+        #}
+        {%- set discovery_globs = [] -%}
+        {%- for event_path in raw_event_input_paths(event_type) -%}
+            {% do discovery_globs.append(event_path ~ '/**/*.parquet') %}
+        {%- endfor -%}
+        {%- set discovery_sql -%}
+            select file from glob({{ raw_globs_sql(discovery_globs) }})
         {%- endset -%}
-        {%- set results = run_query(sql) -%}
-        {%- if results is not none and results|length > 0 and results.columns[0].values()[0] > 0 -%}
-            {% do ns.existing_globs.append(glob_path) %}
+        {%- set discovered_files = run_query(discovery_sql) -%}
+        {%- set files = [] -%}
+        {%- if discovered_files is not none -%}
+            {%- for row in discovered_files.rows -%}
+                {% do files.append(row[0]) %}
+            {%- endfor -%}
         {%- endif -%}
-    {%- endfor -%}
+        {%- for glob_path in requested_globs -%}
+            {%- set partition_prefix = glob_path | replace('/**/*.parquet', '') ~ '/' -%}
+            {%- set match = namespace(found=false) -%}
+            {%- for file_path in files -%}
+                {%- if file_path.startswith(partition_prefix) -%}
+                    {%- set match.found = true -%}
+                {%- endif -%}
+            {%- endfor -%}
+            {%- if match.found -%}
+                {% do ns.existing_globs.append(glob_path) %}
+            {%- endif -%}
+        {%- endfor -%}
+    {%- else -%}
+        {%- for glob_path in requested_globs -%}
+            {%- set sql -%}
+                select count(*) as num_files
+                from glob('{{ glob_path | replace("'", "''") }}')
+            {%- endset -%}
+            {%- set results = run_query(sql) -%}
+            {%- if results is not none and results|length > 0 and results.columns[0].values()[0] > 0 -%}
+                {% do ns.existing_globs.append(glob_path) %}
+            {%- endif -%}
+        {%- endfor -%}
+    {%- endif -%}
 
     {{ return(ns.existing_globs) }}
 {%- endmacro %}
