@@ -4,6 +4,8 @@ import duckdb
 import pytest
 from .test_network_activity_sql import connection, insert_activity, render as render_network
 
+pytestmark = pytest.mark.contract
+
 DBT = Path(__file__).resolve().parents[1] / 'wintap_dbt'
 
 

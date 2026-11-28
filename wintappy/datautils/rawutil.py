@@ -301,12 +301,6 @@ def get_raw_view(event_type: str, pathspec):
     if not "AgentId" in schema.names:
         agent_id_col = "cast(null as varchar) agentid"
 
-    if "ConnId" in schema.names:
-        # Wintap used in ACME4 has a bug in CONNID creation: its not sorting the src/dest fields. Fix it here.
-        # Column list that generates a new connid value
-        # Note: the duckdb MD5 function generates lowercase hashes and we normally save as UPPER. Leaving it as lowercase to let it intentionally standout.
-        col_list = "md5(concat_ws(':',list_sort([int_to_ip(cast(localipaddr as bigint)), cast(localport AS varchar),int_to_ip(cast(remoteipaddr as bigint)),CAST(remoteport AS varchar),protocol]))) ConnId, * exclude (connid,agentid)"
-
     view_sql = f"""
     create or replace view {event_type} as
     select {col_list}, {agent_id_col}, count(*) num_dups {from_clause}

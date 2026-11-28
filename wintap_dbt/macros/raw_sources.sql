@@ -30,25 +30,38 @@
     {{ parquet_relation(event_type) }}
 {%- endmacro %}
 
+{# Return the columns from the first available raw event alias. #}
+{% macro raw_columns(event_types) -%}
+    {%- if not execute -%}
+        {{ return([]) }}
+    {%- endif -%}
+    {%- set ns = namespace(event_type=none, globs=[]) -%}
+    {%- for candidate in event_types -%}
+        {%- if ns.event_type is none -%}
+            {%- set candidate_globs = matching_raw_sensor_partition_globs(candidate) -%}
+            {%- if candidate_globs | length > 0 -%}
+                {%- set ns.event_type = candidate -%}
+                {%- set ns.globs = candidate_globs -%}
+            {%- endif -%}
+        {%- endif -%}
+    {%- endfor -%}
+    {%- if ns.event_type is none -%}
+        {{ return([]) }}
+    {%- endif -%}
+    {%- set description = run_query(
+        'describe select * from parquet_scan(' ~ raw_globs_sql(ns.globs) ~ ', hive_partitioning=1, union_by_name=true)'
+    ) -%}
+    {%- set columns = [] -%}
+    {%- for row in description.rows -%}
+        {% do columns.append(row[0] | lower) %}
+    {%- endfor -%}
+    {{ return(columns) }}
+{%- endmacro %}
+
 {# Probe whether a column exists in the first available raw event alias. #}
 {% macro raw_column_exists(event_types, column_name) -%}
     {%- if not execute -%}
         {{ return(true) }}
     {%- endif -%}
-    {%- set event_type = first_existing_raw_event(event_types) -%}
-    {%- if event_type is none -%}
-        {{ return(false) }}
-    {%- endif -%}
-    {%- set globs = matching_raw_sensor_partition_globs(event_type) -%}
-    {%- if globs | length == 0 -%}
-        {{ return(false) }}
-    {%- endif -%}
-    {%- set sql -%}
-        select column_name
-        from (describe select * from parquet_scan({{ raw_globs_sql(globs) }}, hive_partitioning=1, union_by_name=true))
-        where lower(column_name) = lower('{{ column_name }}')
-        limit 1
-    {%- endset -%}
-    {%- set results = run_query(sql) -%}
-    {{ return(results is not none and results|length > 0) }}
+    {{ return(column_name | lower in raw_columns(event_types)) }}
 {%- endmacro %}

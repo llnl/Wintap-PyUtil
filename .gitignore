@@ -80,7 +80,11 @@ tramp
 
 # Local config files. A common practice is to have many, so ignore those also.
 wintappy_settings.toml*
-wintap-run.env
+wintap-run.env*
+!wintap-run.env.example
+
+# Local runtime datasets are never source fixtures.
+/data/
 
 # Track the exact main/standalone qualification locks; ignore other local locks.
 uv.lock

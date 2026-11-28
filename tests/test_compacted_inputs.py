@@ -87,6 +87,10 @@ def fixture_queries():
         f"0::BIGINT {c}"
         for c in "ParentPID CpuCycleCount CpuUtilization CommitCharge CommitPeak ReadOperationCount WriteOperationCount ReadTransferKilobytes WriteTransferKilobytes HardFaultCount TokenElevationType ExitCode".split()
     )
+    process += ", NULL::VARCHAR ExecutionObservationKind"
+    process += ", NULL::BIGINT ObservationTimeFileTimeUtc"
+    process += ", NULL::BIGINT ObservationTimeMonotonicNanoseconds"
+    process += ", NULL::BIGINT ReceiveTime"
     host = "'test-agent' AgentId, 'test-host' Hostname, 1767225600::BIGINT EventTime, 'test-os' OS, '1' OSVersion, 'arm64' Arch, 4 ProcessorCount, 2000 ProcessorSpeed, false HasBattery, '' \"Domain\", '' DomainRole, 0::BIGINT LastBoot, '7' WintapVersion, '7' ETLVersion"
     file = (
         common
@@ -94,7 +98,7 @@ def fixture_queries():
     )
     network = (
         common
-        + ", '{proto}' Protocol, '{activity}' IpEvent, 134117856000000000::BIGINT FirstSeenMs, 134117856001000000::BIGINT LastSeenMs, '127.0.0.1' SourceIPAddressString, '127.0.0.2' DestinationIPAddressString, 2130706433::BIGINT LocalIpAddr, 2130706434::BIGINT RemoteIpAddr, '' LocalIpPrivateGateway, '' RemoteIpPrivateGateway, 1000 LocalPort, 2000 RemotePort, 2 EventCount, 10 PacketSize, 5 MinPacketSize, 5 MaxPacketSize, 50 PacketSizeSquared"
+        + ", 'producer-{proto}-connection' ConnId, '{proto}' Protocol, '{activity}' IpEvent, 134117856000000000::BIGINT FirstSeenMs, 134117856001000000::BIGINT LastSeenMs, '127.0.0.1' SourceIPAddressString, '127.0.0.2' DestinationIPAddressString, 2130706433::BIGINT LocalIpAddr, 2130706434::BIGINT RemoteIpAddr, '' LocalIpPrivateGateway, '' RemoteIpPrivateGateway, 1000 LocalPort, 2000 RemotePort, 2 EventCount, 10 PacketSize, 5 MinPacketSize, 5 MaxPacketSize, 50 PacketSizeSquared"
     )
     macip = "'test-agent' AgentId, 'test-host' Hostname, '' PrivateGateway, 2130706433::BIGINT IpAddr, '00:00:00:00:00:01' Mac, 1500 MTU, 1767225600::BIGINT EventTime"
     pidstat = "timestamp '2026-01-01 00:00:00' AS time, 1000 uid, 42 pid, 'worker' command, 'test-host' hostname, NULL::VARCHAR cgroup_path, 1::BIGINT pid_ns_inode, NULL::VARCHAR container_runtime, NULL::VARCHAR container_id"
@@ -143,8 +147,36 @@ def seed_fixture(directory):
                     )
 
 
-def test_existing_process_model_depends_on_row_order():
-    """Diagnostic: unordered ANY_VALUE is not a stable migration comparison."""
+def test_process_conn_dbt_build_preserves_producer_conn_id(env, tmp_path):
+    seed_fixture(tmp_path / "input/raw_sensor")
+    env.update(
+        WINTAP_DBT_START_DAY="20260101",
+        WINTAP_DBT_START_HOUR="23",
+        WINTAP_DBT_END_DAY="20260102",
+        WINTAP_DBT_END_HOUR="00",
+    )
+
+    build(
+        env,
+        tmp_path / "conn-id-build",
+        select=(
+            "stg_raw_process_conn_incr",
+            "process_conn_incr",
+            "process_conn_incr_conn_id_not_null",
+        ),
+    )
+
+    with duckdb.connect(env["WINTAP_DBT_DATABASE"], read_only=True) as conn:
+        assert conn.execute(
+            "select distinct conn_id from process_conn_incr order by conn_id"
+        ).fetchall() == [
+            ("producer-tcp-connection",),
+            ("producer-udp-connection",),
+        ]
+
+
+def test_process_model_selects_stable_paired_image_row():
+    """Changing image fields are selected together and independently of input order."""
     query = "select " + fixture_queries()["raw_process"]
     model = render(ROOT / "wintap_dbt/models/silver/process.sql")
     inputs, outputs = [], []
@@ -167,9 +199,58 @@ def test_existing_process_model_depends_on_row_order():
                 ).fetchall()
             )
     assert inputs[0] == inputs[1]  # Same rows and multiplicities.
-    assert outputs[0] != outputs[1]
-    assert outputs[0][0][0] == "/before"
-    assert outputs[1][0][0] == "/after"
+    assert outputs[0] == outputs[1]
+    assert outputs[0][0][0] in ("/before", "/after")
+    assert outputs[0][0][1] == outputs[0][0][0]
+
+
+def test_process_model_prefers_refresh_then_success_and_excludes_attempts():
+    query = "select " + fixture_queries()["raw_process"]
+    model = render(ROOT / "wintap_dbt/models/silver/process.sql")
+    with duckdb.connect() as conn:
+        conn.execute("create table stg_raw_process as " + query + " where false")
+        rows = [
+            ("python", "/usr/bin/python", "initial", "START", None, 100),
+            ("missing", "/bin/missing", "attempt", "START", "exec_attempt", 200),
+            ("worker", "/opt/worker", "success", "START", "exec_success", 300),
+            ("python", "/usr/bin/python", "refresh", "Refresh", None, 400),
+        ]
+        for name, path, args, activity, kind, observed_at in rows:
+            conn.execute(
+                """
+                insert into stg_raw_process
+                select * replace (
+                    ? as ProcessName,
+                    ? as ProcessPath,
+                    ? as ProcessArgs,
+                    ? as ActivityType,
+                    ? as ExecutionObservationKind,
+                    ? as ObservationTimeFileTimeUtc,
+                    ? as ObservationTimeMonotonicNanoseconds,
+                    ? as ReceiveTime
+                ) from (select * from ({{ base }}) )
+                """.replace("{{ base }}", query),
+                [name, path, args, activity, kind, observed_at, observed_at, observed_at],
+            )
+
+        selected = conn.execute(
+            """
+            select process_name, args, process_path, image_selection,
+                   image_observation_kind
+            from ({{ model }})
+            """.replace("{{ model }}", model)
+        ).fetchone()
+        assert selected == ("python", "refresh", "/usr/bin/python", "refresh", None)
+
+        conn.execute("delete from stg_raw_process where ActivityType = 'Refresh'")
+        selected = conn.execute(
+            """
+            select process_name, args, process_path, image_selection,
+                   image_observation_kind
+            from ({{ model }})
+            """.replace("{{ model }}", model)
+        ).fetchone()
+        assert selected == ("worker", "success", "/opt/worker", "exec_success", "exec_success")
 
 
 def build(env, directory, select=(), timeout=240):

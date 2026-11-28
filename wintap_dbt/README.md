@@ -339,16 +339,16 @@ its rows nor its `EventCount` should be presented as distinct kernel events.
 Attribution accepts exact identity or a single host/PID/lifetime candidate;
 ambiguous and unmatched observations remain visible without assigned ownership.
 
-### Temporary network identity compatibility change
+### Network connection identity
 
-`process_conn_incr.conn_id` currently replaces producer `connid` with an uppercase
-MD5 of a canonical JSON five-tuple (protocol and ordered IP/port endpoint pairs,
-with context `llnl`). Reversed endpoints share an ID; missing tuple fields yield
-NULL. This is a temporary DBT validation shim, **not** the authoritative Wintap
-.NET implementation or a connection-instance identity: repeated uses of the same
-five-tuple share the key. Existing IDs and joins to producer IDs can change;
-rebuild dependent models together and review downstream consumers before release.
-See `macros/network_keys.sql` and `tests/temporary_five_tuple_conn_id_contract.sql`.
+`process_conn_incr.conn_id` preserves producer `connid`. Wintap .NET is the sole
+five-tuple identity generator; DBT does not reorder endpoints or hash a replacement.
+`conn_id` identifies a context-qualified tuple, not one connection instance, so
+repeated uses of the same tuple share the key. The change from the temporary DBT
+hash back to producer IDs ships as a clean cutover to newly collected data; legacy
+and producer-derived populations are not migrated or combined. The synthetic
+real-DBT regression in `tests/test_compacted_inputs.py` verifies producer IDs
+survive bronze/silver materialization unchanged.
 
 ## Layers
 

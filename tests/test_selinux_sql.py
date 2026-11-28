@@ -6,6 +6,8 @@ import duckdb
 import jinja2
 import pytest
 
+pytestmark = pytest.mark.contract
+
 DBT = Path(__file__).resolve().parents[1] / "wintap_dbt"
 FAMILIES = ("avc", "interaction", "transition")
 

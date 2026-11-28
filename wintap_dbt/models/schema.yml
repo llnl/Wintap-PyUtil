@@ -62,6 +62,14 @@ models:
       - name: hostname
         tests:
           - not_null
+      - name: image_selection
+        description: "Evidence role for the paired process image projection: refresh, exec_success, or fallback."
+      - name: image_observation_kind
+        description: "Producer execution-observation kind from the selected image row."
+      - name: image_observation_time_filetime_utc
+        description: "UTC observation FILETIME from the selected image row; distinct from process birth time."
+      - name: image_observation_time_monotonic_nanoseconds
+        description: "Comparable monotonic observation time from the selected image row when provided."
 
   - name: process_net_conn
     description: Connection-level network activity aggregated from network increments.
